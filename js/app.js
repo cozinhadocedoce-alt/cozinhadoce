@@ -74,17 +74,28 @@ const I = {
   chat: '<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.6A8 8 0 1 1 21 12z"/></svg>',
   send: '<svg viewBox="0 0 24 24"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>',
   search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></svg>',
+  archive: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/></svg>',
   edit: '<svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
   whats: '<svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2zm5.2 14.1c-.2.6-1.3 1.2-1.8 1.3-.5 0-1 .3-3.3-.7-2.8-1.1-4.5-4-4.7-4.2-.1-.2-1.1-1.5-1.1-2.9s.7-2 1-2.3c.2-.3.5-.3.7-.3h.5c.2 0 .4 0 .6.5l.9 2.1c.1.2.1.4 0 .6l-.4.6-.4.4c-.1.2-.3.3-.1.6.2.3.8 1.3 1.7 2.1 1.2 1 2.1 1.3 2.4 1.5.3.1.5.1.7-.1l1-1.2c.2-.3.4-.2.7-.1l2 1c.3.1.5.2.5.3.1.2.1.7-.1 1.3z"/></svg>',
   google: '<svg viewBox="0 0 48 48" width="20" height="20"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>',
 };
 
-function toast(msg, ms = 2600) {
+// action (opcional): { label, run } vira um botão no aviso, como "Desfazer".
+function toast(msg, ms = 2600, action = null) {
   const t = document.getElementById('toast');
   t.textContent = msg;
+  t.classList.toggle('has-action', !!action);
+  if (action) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-action';
+    btn.textContent = action.label;
+    btn.onclick = () => { t.classList.remove('show'); action.run(); };
+    t.append(' ', btn);
+  }
   t.classList.add('show');
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => t.classList.remove('show'), ms);
+  toast.timer = setTimeout(() => t.classList.remove('show'), action ? Math.max(ms, 6000) : ms);
 }
 const fail = (err) => { console.error(err); toast(err?.message || 'Algo deu errado. Tente de novo.', 4000); };
 
@@ -1068,22 +1079,133 @@ async function refreshUnread() {
   try { paintUnread(await screenFetch('chat', loadChats)); } catch { /* sem rede */ }
 }
 
+// Arquivar (supabase/002_arquivar_conversas.sql): o cliente arquiva o lado dele; os administradores,
+// o lado da loja. Mensagem nova desarquiva; 30 dias arquivada, a conversa é apagada para quem arquivou.
+const adminSide = (c) => isAdmin() && c.customer_id !== user()?.id;
+const myArchivedAt = (c) => (adminSide(c) ? c.admin_archived_at : c.customer_archived_at);
+const daysLeft = (iso) => Math.max(0, 30 - Math.floor((Date.now() - new Date(iso)) / 864e5));
+async function setArchived(c, archive) {
+  await api.archiveConversation(c.id, archive);
+  const at = archive ? new Date().toISOString() : null;
+  const patch = adminSide(c) ? { admin_archived_at: at } : { customer_archived_at: at };
+  if (archive) Object.assign(patch, adminSide(c) ? { admin_read_at: at } : { customer_read_at: at });
+  Object.assign(c, patch);
+  const list = screenCached('chat');
+  if (list) screenUpdate('chat', list.map((x) => (x.id === c.id ? { ...x, ...patch } : x)));
+  refreshUnread();
+}
+
 const convRow = (c) => {
   const who = isAdmin() && c.customer_id !== user().id ? c.customer?.name || 'Cliente' : settings.app_name;
   const un = isUnread(c);
-  return `<a class="conv ${un ? 'unread' : ''}" href="#/chat/${esc(c.id)}">
-    <span class="conv-photo"><img src="${esc(c.photo_url)}" alt="" loading="lazy">
-      ${isAdmin() && c.customer_id !== user().id ? (c.customer?.avatar_url ? `<img class="avatar" src="${esc(c.customer.avatar_url)}" alt="" referrerpolicy="no-referrer">` : `<span class="avatar">${initials(who)}</span>`) : ''}</span>
-    <span class="grow"><div class="conv-title">${esc(c.title)}</div><div class="conv-last">${esc(who)}: ${esc(c.last_message || 'Conversa iniciada')}</div></span>
+  const arch = myArchivedAt(c);
+  return `<a class="conv ${un ? 'unread' : ''}" href="#/chat/${esc(c.id)}" draggable="false">
+    <span class="conv-photo"><img src="${esc(c.photo_url)}" alt="" loading="lazy" draggable="false">
+      ${isAdmin() && c.customer_id !== user().id ? (c.customer?.avatar_url ? `<img class="avatar" src="${esc(c.customer.avatar_url)}" alt="" referrerpolicy="no-referrer" draggable="false">` : `<span class="avatar">${initials(who)}</span>`) : ''}</span>
+    <span class="grow"><div class="conv-title">${esc(c.title)}</div><div class="conv-last">${esc(who)}: ${esc(c.last_message || 'Conversa iniciada')}</div>
+      ${arch ? `<div class="conv-expire">Apagada em ${daysLeft(arch)} ${daysLeft(arch) === 1 ? 'dia' : 'dias'}</div>` : ''}</span>
     <span class="stack" style="gap:6px;justify-items:end"><span class="conv-time">${fmtTime(c.last_message_at)}</span>${un ? '<span class="unread-dot"></span>' : ''}</span></a>`;
 };
+// Linha com o fundo da ação por trás (aparece ao arrastar para a esquerda).
+const swipeRow = (c, archived) => `<div class="conv-swipe" data-id="${esc(c.id)}">
+  <span class="conv-swipe-bg ${archived ? 'restore' : ''}" aria-hidden="true">${I.archive}${archived ? 'Desarquivar' : 'Arquivar'}</span>${convRow(c)}</div>`;
+
+// Arrastar para a esquerda: passando de 35% da largura, onSwipe(wrap) age (devolve true; com
+// false a linha volta ao lugar). A rolagem vertical continua normal.
+function swipeRows(list, onSwipe) {
+  let row = null;
+  let startX = 0;
+  let startY = 0;
+  let dx = 0;
+  let dragging = false;
+  list.addEventListener('pointerdown', (e) => {
+    row = e.button === 0 ? e.target.closest('.conv-swipe > .conv') : null;
+    startX = e.clientX;
+    startY = e.clientY;
+    dx = 0;
+    dragging = false;
+  });
+  list.addEventListener('pointermove', (e) => {
+    if (!row) return;
+    const x = e.clientX - startX;
+    const y = e.clientY - startY;
+    if (!dragging) {
+      if (Math.abs(y) > 10 && Math.abs(y) > Math.abs(x)) return void (row = null); // está rolando a lista
+      if (x > -10) return;
+      dragging = true;
+      row.setPointerCapture(e.pointerId);
+      row.classList.add('dragging');
+    }
+    dx = Math.min(0, x);
+    row.style.transform = `translateX(${dx}px)`;
+  });
+  const end = async () => {
+    if (!row) return;
+    const r = row;
+    row = null;
+    r.classList.remove('dragging');
+    if (!dragging) return;
+    setTimeout(() => (dragging = false)); // depois do clique que o soltar dispara
+    if (-dx < r.offsetWidth * 0.35) return void (r.style.transform = '');
+    const wrap = r.closest('.conv-swipe');
+    r.style.transform = 'translateX(-100%)';
+    wrap.classList.add('removing');
+    if (await onSwipe(wrap)) {
+      wrap.hidden = true;
+    } else {
+      wrap.classList.remove('removing');
+      r.style.transform = '';
+    }
+  };
+  list.addEventListener('pointerup', end);
+  list.addEventListener('pointercancel', end);
+  // Soltar depois de arrastar não abre a conversa.
+  list.addEventListener('click', (e) => dragging && e.preventDefault(), true);
+}
 
 async function viewChats(ctx) {
   if (!user()) { $view.innerHTML = loginGate('💬', 'Converse com a gente', 'Toque em "Conversar sobre esta foto" em qualquer doce. Entre com o Google para ver suas conversas.'); return; }
+  let current = [];
+  let openArchived = false;
   const draw = (list) => {
+    current = list;
+    const active = list.filter((c) => !myArchivedAt(c));
+    const archived = list.filter((c) => myArchivedAt(c));
     $view.innerHTML = `<div class="page">${pageHead(isAdmin() ? 'Conversas com clientes' : 'Chat', { back: false })}
-      ${list.length ? `<div>${list.map(convRow).join('')}</div>`
+      ${list.length ? `
+        ${active.length ? `<p class="small muted pad" style="margin:0 0 4px">Arraste uma conversa para a esquerda para arquivar.</p>
+          <div id="conv-list">${active.map((c) => swipeRow(c, false)).join('')}</div>`
+        : '<p class="muted pad center" style="margin:18px 0">Nenhuma conversa aberta. 🎉</p>'}
+        ${archived.length ? `<details class="archived" id="archived" ${openArchived ? 'open' : ''}>
+          <summary><span class="li-ico">${I.archive}</span><b class="grow">Arquivadas</b><span class="count">${archived.length}</span></summary>
+          <p class="small muted pad" style="margin:0 0 4px">São apagadas para você 30 dias depois de arquivadas. Mensagem nova traz a conversa de volta. Arraste para a esquerda para desarquivar.</p>
+          <div id="arch-list">${archived.map((c) => swipeRow(c, true)).join('')}</div></details>` : ''}`
       : emptyBox('💬', 'Nenhuma conversa ainda', 'Cada conversa nasce de uma foto: abra um doce e toque em <b>Conversar sobre esta foto</b>.', '<a class="btn" href="#/">Ver o cardápio</a>')}</div>`;
+    document.getElementById('archived')?.addEventListener('toggle', (e) => (openArchived = e.target.open));
+    for (const id of ['conv-list', 'arch-list']) {
+      const el = document.getElementById(id);
+      if (el) swipeRows(el, (wrap) => onSwipe(wrap, id === 'conv-list'));
+    }
+  };
+  const onSwipe = async (wrap, archive) => {
+    const c = current.find((x) => x.id === wrap.dataset.id);
+    if (!c) return false;
+    try {
+      await setArchived(c, archive);
+    } catch (err) {
+      fail(err);
+      return false;
+    }
+    // Depois da animação, redesenha (vai para "Arquivadas", ou volta para a lista).
+    setTimeout(() => ctx.alive() && draw(screenCached('chat') || current), 220);
+    toast(archive ? 'Conversa arquivada.' : 'Conversa desarquivada.', 2600, {
+      label: 'Desfazer',
+      run: async () => {
+        try { await setArchived(c, !archive); } catch (err) { return fail(err); }
+        if (ctx.alive()) draw(screenCached('chat') || current);
+      },
+    });
+    return true;
   };
   // Mensagem nova: confere a lista e redesenha.
   const h = () => screenFetch('chat', loadChats).then((l) => ctx.alive() && draw(l)).catch(() => {});
@@ -1143,6 +1265,7 @@ async function viewChat(ctx, [id]) {
         <div class="grow"><div style="font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.title)}</div>
           <div class="small muted">${adminView ? esc(c.customer?.name || 'Cliente') : `${esc(settings.app_name)} · responde rapidinho`}</div></div>
         ${adminView && c.customer?.whatsapp ? `<a class="icon-btn" style="color:#25d366" target="_blank" rel="noopener" href="${esc(waLink(c.customer.whatsapp, `Olá, ${firstName(c.customer.name)}! Aqui é da ${settings.app_name}.`))}" aria-label="WhatsApp do cliente">${I.whats}</a>` : ''}
+        <button class="icon-btn" id="arch" aria-label="${myArchivedAt(c) ? 'Desarquivar conversa' : 'Arquivar conversa'}" title="${myArchivedAt(c) ? 'Desarquivar' : 'Arquivar'}">${I.archive}</button>
       </header>
       <div class="chat-scroll" id="msgs"></div>
       ${!adminView ? `<div class="quick" id="quick">${['Ainda tem disponível?', 'Qual o prazo?', 'Faz em outra cor?', 'Quero encomendar! 🙌'].map((t) => `<button class="chip">${t}</button>`).join('')}</div>` : ''}
@@ -1152,6 +1275,19 @@ async function viewChat(ctx, [id]) {
       </form>
     </div>`;
     drawMsgs();
+    // Arquivar pela conversa (alternativa ao gesto de arrastar na lista).
+    document.getElementById('arch').onclick = async () => {
+      const archive = !myArchivedAt(st.c);
+      try { await setArchived(st.c, archive); } catch (err) { return fail(err); }
+      remember();
+      if (archive) {
+        toast('Conversa arquivada. Ela é apagada para você em 30 dias.', 2600, { label: 'Desfazer', run: () => setArchived(st.c, false).then(remember).catch(fail) });
+        location.hash = '#/chat';
+      } else {
+        toast('Conversa desarquivada.');
+        drawPage();
+      }
+    };
 
     const $text = document.getElementById('text');
     const grow = () => { $text.style.height = 'auto'; $text.style.height = Math.min($text.scrollHeight, 120) + 'px'; };

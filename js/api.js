@@ -193,6 +193,10 @@ function supabaseApi(sb) {
     async markRead(conversationId) {
       await sb.rpc('mark_conversation_read', { p_conversation: conversationId });
     },
+    // Arquiva (true) ou desarquiva (false) só para quem chamou (supabase/002_arquivar_conversas.sql).
+    async archiveConversation(conversationId, archive = true) {
+      ok(await sb.rpc('archive_conversation', { p_conv: conversationId, p_archive: archive }));
+    },
     subscribeChat(onMessage, onConversation) {
       const ch = sb.channel(`chat-${user.id}-${Date.now()}`)
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (p) => onMessage(p.new))
@@ -383,7 +387,8 @@ function demoApi() {
 
     async listConversations() {
       if (!db.user) return [];
-      return clone(db.conversations).map((c) => ({ ...c, customer: { name: db.profile?.name, avatar_url: null, whatsapp: db.profile?.whatsapp } }))
+      const expired = (c) => c.customer_archived_at && Date.now() - new Date(c.customer_archived_at) > 30 * 864e5;
+      return clone(db.conversations.filter((c) => !expired(c))).map((c) => ({ ...c, customer: { name: db.profile?.name, avatar_url: null, whatsapp: db.profile?.whatsapp } }))
         .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
     },
     async getConversation(id) {
@@ -406,14 +411,14 @@ function demoApi() {
       const c = db.conversations.find((x) => x.id === conversationId);
       const m = { id: Date.now(), conversation_id: conversationId, sender_id: db.user.id, body, created_at: new Date().toISOString() };
       db.messages.push(m);
-      Object.assign(c, { last_message: body, last_message_at: m.created_at, last_sender: m.sender_id, customer_read_at: m.created_at });
+      Object.assign(c, { last_message: body, last_message_at: m.created_at, last_sender: m.sender_id, customer_read_at: m.created_at, customer_archived_at: null });
       save();
       // Resposta automática, para dar para ver como fica o chat.
       if (db.messages.filter((x) => x.conversation_id === conversationId && x.sender_id === 'loja').length < 1) {
         setTimeout(() => {
           const r = { id: Date.now(), conversation_id: conversationId, sender_id: 'loja', body: 'Oi! 💕 Aqui é a Cozinha Doce. Recebemos sua mensagem e já respondemos. (Esta é uma resposta automática da demonstração.)', created_at: new Date().toISOString() };
           db.messages.push(r);
-          Object.assign(c, { last_message: r.body, last_message_at: r.created_at, last_sender: 'loja' });
+          Object.assign(c, { last_message: r.body, last_message_at: r.created_at, last_sender: 'loja', customer_archived_at: null });
           save();
           emitMsg(r, c);
         }, 1400);
@@ -423,6 +428,13 @@ function demoApi() {
     async markRead(id) {
       const c = db.conversations.find((x) => x.id === id);
       if (c) { c.customer_read_at = new Date().toISOString(); save(); }
+    },
+    async archiveConversation(id, archive = true) {
+      const c = db.conversations.find((x) => x.id === id);
+      if (!c) throw new Error('Conversa não encontrada.');
+      c.customer_archived_at = archive ? new Date().toISOString() : null;
+      if (archive) c.customer_read_at = new Date().toISOString();
+      save();
     },
     subscribeChat(onMessage, onConversation) {
       const pair = [onMessage, onConversation];

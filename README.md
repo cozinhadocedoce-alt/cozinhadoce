@@ -30,6 +30,9 @@ PWA para apresentar e vender doces. Mesmo jeito do Desapega: **HTML + JavaScript
    insert into public.admins (user_id) select id from auth.users where email = 'SEU-EMAIL@gmail.com';
    ```
 
+### 1b. Arquivar conversas
+Rode [`supabase/002_arquivar_conversas.sql`](supabase/002_arquivar_conversas.sql) no SQL Editor: arrastar uma conversa para a esquerda no Chat a arquiva (só para quem arrastou, com Desfazer). Mensagem nova desarquiva. Depois de 30 dias arquivada, a conversa é apagada para quem arquivou; quando os dois lados apagaram, ela sai do banco (limpeza diária com `pg_cron`).
+
 ### 2. Funções (IA, notificações e ícone)
 Com a [CLI do Supabase](https://supabase.com/docs/guides/cli) (`npx supabase login`):
 ```bash
