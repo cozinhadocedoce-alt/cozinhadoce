@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cozinha Doce</title>
+<script>
+  // Link de compartilhamento de um doce publicado há pouco (a página d/<id>/ ainda não foi gerada):
+  // leva direto para o doce no app. Qualquer outro endereço vai para o início.
+  (function () {
+    var m = location.pathname.match(/^(.*?\/)d\/([0-9a-f-]{36})\/?$/i);
+    var base = m ? m[1] : location.pathname.replace(/[^/]*$/, '').replace(/\/d\/.*$/, '/');
+    location.replace(base + (m ? '#/doce/' + m[2] : ''));
+  })();
+</script>
+</head>
+<body><a href="./">Abrir a Cozinha Doce</a></body>
+</html>

@@ -551,7 +551,17 @@ function drawProduct(ctx, id, p) {
     return;
   }
   const cat = catOf(p.category);
-  const link = `${location.origin}${location.pathname}#/doce/${p.id}`;
+  // Link de compartilhamento: a página d/<id>/ tem a foto nas tags que o WhatsApp lê (scripts/build-site.mjs).
+  const link = `${location.origin}${location.pathname.replace(/index.html$/, '')}d/${p.id}/`;
+  // A foto já vai sendo preparada para o Compartilhar enviar junto (o iPhone exige que o
+  // compartilhamento saia logo após o toque, sem esperar download).
+  let shareFile = null;
+  if (p.photos[0] && navigator.canShare) {
+    fetch(p.photos[0]).then((r) => r.blob()).then((b) => {
+      const f = new File([b], `${slugify(p.title) || 'doce'}.${/png/.test(b.type) ? 'png' : 'jpg'}`, { type: b.type || 'image/jpeg' });
+      if (navigator.canShare({ files: [f] })) shareFile = f;
+    }).catch(() => {});
+  }
   $view.innerHTML = `<div class="page">
     <div class="gallery">
       <div class="gallery-top">
@@ -604,11 +614,19 @@ function drawProduct(ctx, id, p) {
     if (b) gal.scrollTo({ left: gal.clientWidth * Number(b.dataset.i), behavior: 'smooth' });
   });
   document.getElementById('chat-photo').onclick = () => startChat(p.id, p.photos[idx]);
+  // Compartilhar: a foto vai junto, com nome, preço e link na legenda. Sem suporte a foto, vai o
+  // link (que mostra a foto na prévia); no computador, copia o link.
   document.getElementById('share').onclick = async () => {
+    const text = `${p.title} — ${money(p.price)}`;
     try {
-      if (navigator.share) await navigator.share({ title: p.title, text: `${p.title} — ${money(p.price)}`, url: link });
+      if (shareFile) await navigator.share({ files: [shareFile], title: p.title, text: `${text}
+${link}` });
+      else if (navigator.share) await navigator.share({ title: p.title, text, url: link });
       else { await navigator.clipboard.writeText(link); toast('Link copiado 🔗'); }
-    } catch {}
+    } catch (err) {
+      if (err?.name === 'AbortError') return; // a pessoa desistiu
+      try { await navigator.share({ title: p.title, text, url: link }); } catch { await navigator.clipboard?.writeText(link).then(() => toast('Link copiado 🔗')).catch(() => {}); }
+    }
   };
   document.getElementById('feat')?.addEventListener('click', async () => {
     try {
