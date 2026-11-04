@@ -315,18 +315,40 @@ document.addEventListener('click', async (e) => {
     else location.hash = '#/';
   }
 });
+// O dedo encostou num doce: já começa a baixar as fotos dele (o toque só vira clique ao soltar).
+document.addEventListener('pointerdown', (e) => {
+  const a = e.target.closest('a[href^="#/doce/"]');
+  const p = a && knownProduct(a.getAttribute('href').slice(7));
+  p?.photos?.slice(0, 2).forEach((u) => { new Image().src = u; });
+}, { passive: true });
 // Formulários: a pessoa começou a mexer nesta tela (screenShow com guard não troca mais nada).
 document.addEventListener('input', () => { currentCtx.touched = true; }, true);
 
 // ===================================================================
 // Início
 // ===================================================================
+// O Início pronto fica guardado (fora da tela) enquanto a pessoa vê um doce: ao voltar, ele é
+// recolocado como estava, sem desenhar os ~100 cartões de novo.
+let homeDom = null;
+const homeSig = () => [user()?.id, isAdmin(), settings.updated_at, settings.app_name, settings.tagline, settings.icon_url, categories.length].join('|');
+
 async function viewHome(ctx) {
-  await screenShow(ctx, 'inicio', loadHome, drawHome);
+  const cached = screenCached('inicio');
+  const json = cached && JSON.stringify(cached);
+  if (homeDom && cached && homeDom.json === json && homeDom.sig === homeSig()) {
+    $view.replaceChildren(homeDom.node);
+    paintHearts();
+    startHero();
+    const fresh = await screenFetch('inicio', loadHome).catch(() => null);
+    if (fresh && ctx.alive() && JSON.stringify(fresh) !== json) drawHome(fresh);
+  } else {
+    await screenShow(ctx, 'inicio', loadHome, drawHome);
+  }
   prefetchScreens();
 }
 
 let stopHero = null;
+const FIRST_CARDS = 12;
 function drawHome(all) {
   stopHero?.();
   let featured = all.filter((p) => p.featured);
@@ -369,12 +391,20 @@ function drawHome(all) {
       <div class="hscroll">${list.slice(0, 8).map(wideCard).join('')}</div></section>`).join('')}
 
     <section class="section"><div class="section-title"><h2>Todos os doces</h2><span class="small muted">${all.length} ${all.length === 1 ? 'opção' : 'opções'}</span></div>
-      <div class="grid">${all.map(productCard).join('')}</div></section>`
+      <div class="grid" id="all-grid"></div></section>`
     : emptyBox('🧁', 'O cardápio está saindo do forno', isAdmin() ? 'Adicione as fotos dos seus doces e a IA ajuda a preencher tudo.' : 'Volte em breve para ver as delícias.',
       isAdmin() ? '<a class="btn" href="#/adicionar">Adicionar doces</a>' : '')}
   </div>`;
 
-  // Carrossel: marca o cartão do meio e passa sozinho a cada 4,5 s (para quando a pessoa toca).
+  homeDom = { json: JSON.stringify(all), sig: homeSig(), node: $view.firstElementChild };
+  const grid = document.getElementById('all-grid');
+  if (grid) fillGrid(grid, all);
+  startHero();
+}
+
+// Carrossel: marca o cartão do meio e passa sozinho a cada 4,5 s (para quando a pessoa toca).
+function startHero() {
+  stopHero?.();
   const track = document.getElementById('hero');
   if (!track) return;
   const cards = [...track.children];
@@ -397,13 +427,27 @@ function drawHome(all) {
     const next = cards[(current + 1) % cards.length];
     track.scrollTo({ left: next.offsetLeft - (track.clientWidth - next.clientWidth) / 2, behavior: 'smooth' });
   }, 4500);
-  stopHero = () => { clearInterval(timer); io.disconnect(); stopHero = null; };
+  const off = () => { track.removeEventListener('touchstart', pause); track.removeEventListener('pointerdown', pause); };
+  stopHero = () => { clearInterval(timer); io.disconnect(); off(); stopHero = null; };
   cleanups.push(() => stopHero?.());
 }
 
 // ===================================================================
 // Buscar (procura no cardápio guardado: abre e filtra na hora, sem esperar o banco)
 // ===================================================================
+// Grade de cartões: os primeiros na hora, o resto em lotes logo em seguida (sem travar o toque).
+function fillGrid(grid, list, first = FIRST_CARDS) {
+  grid.innerHTML = list.slice(0, first).map(productCard).join('');
+  const rest = list.slice(first);
+  const token = (grid._token = {});
+  const more = () => {
+    if (grid._token !== token || !rest.length) return;
+    grid.insertAdjacentHTML('beforeend', rest.splice(0, 24).map(productCard).join(''));
+    if (rest.length) (window.requestIdleCallback || setTimeout)(more, { timeout: 300 });
+  };
+  if (rest.length) (window.requestIdleCallback || setTimeout)(more, { timeout: 300 });
+}
+
 function filterProducts(list, { q, cat, sort }) {
   const words = norm(q).split(/\s+/).filter(Boolean);
   let out = list.filter((p) => (!cat || p.category === cat) && words.every((w) => norm(`${p.title} ${p.description}`).includes(w)));
@@ -447,8 +491,8 @@ async function viewSearch(ctx, _, query) {
     history.replaceState(null, '', `#/buscar${params.size ? '?' + params : ''}`);
     const list = filterProducts(all, f);
     document.getElementById('count').textContent = `${list.length} ${list.length === 1 ? 'doce encontrado' : 'doces encontrados'}`;
-    $results.innerHTML = list.length ? `<div class="grid">${list.map(productCard).join('')}</div>`
-      : emptyBox('🔍', 'Nada por aqui', f.q ? `Não achamos "${esc(f.q)}". Que tal pedir sob encomenda?` : 'Ainda não há doces nesta categoria.',
+    if (list.length) { $results.innerHTML = '<div class="grid"></div>'; fillGrid($results.firstElementChild, list); return; }
+    $results.innerHTML = emptyBox('🔍', 'Nada por aqui', f.q ? `Não achamos "${esc(f.q)}". Que tal pedir sob encomenda?` : 'Ainda não há doces nesta categoria.',
         '<a class="btn soft" href="#/adicionar">💌 Pedir sob encomenda</a>');
   };
   let t;
@@ -1632,7 +1676,33 @@ const ROUTES = [
   [/^\/admin\/novidades$/, viewNewsletter, 'menu'],
 ];
 let renderSeq = 0;
+const scrollPos = new Map();
+let lastHash = location.hash;
+let navByLink = false;
+document.addEventListener('click', (e) => { if (e.target.closest('a[href^="#"]')) navByLink = true; }, true);
+// Ponto de referência da rolagem: o primeiro doce visível e onde ele estava na tela. Cartões fora
+// da tela têm altura estimada, então só o número de pixels não basta para voltar ao mesmo lugar.
+function scrollAnchor() {
+  const links = [...$view.querySelectorAll('a[href^="#/doce/"]')];
+  const i = links.findIndex((a) => a.getBoundingClientRect().bottom > 70);
+  return { y: window.scrollY, i, top: i >= 0 ? links[i].getBoundingClientRect().top : 0 };
+}
+function restoreScroll(pos) {
+  window.scrollTo(0, pos.y);
+  const fix = (n) => {
+    const a = $view.querySelectorAll('a[href^="#/doce/"]')[pos.i];
+    if (!a) return;
+    const d = a.getBoundingClientRect().top - pos.top;
+    if (Math.abs(d) > 2) window.scrollBy(0, d);
+    if (n) requestAnimationFrame(() => fix(n - 1));
+  };
+  if (pos.i >= 0) fix(3);
+}
 async function render() {
+  scrollPos.set(lastHash, scrollAnchor());
+  lastHash = location.hash;
+  const restore = !navByLink && scrollPos.get(location.hash);
+  navByLink = false;
   const my = ++renderSeq;
   const ctx = { alive: () => my === renderSeq, touched: false };
   currentCtx = ctx;
@@ -1646,9 +1716,12 @@ async function render() {
   const params = path.match(route[0])?.slice(1).map(decodeURIComponent) || [];
   document.body.classList.toggle('no-tabbar', !!route[3]);
   $tabbar.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === route[2]));
-  window.scrollTo(0, 0);
   try {
-    await route[1](ctx, params, query);
+    // A tela já está desenhada quando a função volta pela primeira vez (com o guardado). Só então
+    // rola: rolar antes faria o celular medir a tela antiga (o Início inteiro) à toa.
+    const done = route[1](ctx, params, query);
+    if (restore) restoreScroll(restore); else window.scrollTo(0, 0);
+    await done;
   } catch (err) {
     if (!ctx.alive()) return;
     console.error(err);

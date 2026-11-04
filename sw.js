@@ -1,6 +1,6 @@
 // Service worker: abre rápido, funciona com internet ruim e mostra as notificações.
 // Arquivos do app: rede primeiro, cache como reserva. Dados do Supabase: sempre da rede.
-const CACHE = 'cozinha-doce-v5';
+const CACHE = 'cozinha-doce-v6';
 const SHELL = [
   './',
   'index.html',
@@ -45,6 +45,18 @@ self.addEventListener('fetch', (e) => {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(req, copy));
         return res;
+      })),
+    );
+    return;
+  }
+
+  // Fotos e ícones: mostra o que já está guardado na hora e atualiza em segundo plano.
+  if (/\/(fotos|icons)\//.test(url.pathname)) {
+    e.respondWith(
+      caches.open(CACHE).then((c) => c.match(req).then((hit) => {
+        const net = fetch(req).then((res) => { if (res.ok) c.put(req, res.clone()); return res; });
+        if (hit) { e.waitUntil(net.catch(() => {})); return hit; }
+        return net;
       })),
     );
     return;

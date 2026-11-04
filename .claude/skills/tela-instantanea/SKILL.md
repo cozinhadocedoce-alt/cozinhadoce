@@ -55,3 +55,12 @@ e atualize só o elemento quando o dado chegar (veja `viewMenu`).
 
 Abra o Início, espere `networkidle`, faça o banco demorar 4 s com `page.route('**/rest/v1/**', ...)`
 e confira que a tela aparece em até 1 s (`{ timeout: 1000 }`).
+
+## Leve no celular (medido com processador 4× mais lento)
+
+- Grades de doces: use `fillGrid(el, lista)` (12 cartões na hora, o resto em lotes). Nunca desenhe
+  ~100 cartões de uma vez.
+- O Início pronto é guardado em `homeDom` e recolocado ao voltar; a rolagem volta pelo ponto de
+  referência (`scrollAnchor`/`restoreScroll`). Rolar só depois de desenhar a tela nova.
+- Nada de `backdrop-filter` em itens repetidos (cartões, corações): cada um vira uma camada.
+- Nada de animação de entrada longa nas telas.
