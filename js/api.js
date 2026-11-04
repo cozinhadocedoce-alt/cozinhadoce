@@ -8,8 +8,8 @@ const BASE_URL = location.origin + location.pathname.replace(/index\.html$/, '')
 
 const DEFAULT_SETTINGS = {
   app_name: 'Cozinha Doce',
-  tagline: 'Doces feitos com carinho',
-  primary_color: '#e5568a',
+  tagline: 'Macarons e doces finos · Milena Andrade',
+  primary_color: '#7b4a2e',
   icon_url: null,
   icon_192_url: null,
   whatsapp: null,
