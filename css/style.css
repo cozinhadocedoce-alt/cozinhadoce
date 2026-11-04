@@ -67,7 +67,8 @@ h1, h2, h3 { font-family: var(--font-display); line-height: 1.15; margin: 0; let
 [hidden] { display: none !important; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
-#app { max-width: 560px; margin: 0 auto; min-height: 100dvh; position: relative; }
+/* overflow-x: clip — nenhuma tela pode deslizar para os lados (sem criar outra área de rolagem). */
+#app { max-width: 560px; margin: 0 auto; min-height: 100dvh; position: relative; overflow-x: clip; }
 #view { padding-bottom: calc(var(--tabbar-h) + var(--safe-b) + 24px); min-height: 100dvh; }
 .no-tabbar #view { padding-bottom: 0; }
 .no-tabbar #tabbar { display: none; }
@@ -265,7 +266,8 @@ h1, h2, h3 { font-family: var(--font-display); line-height: 1.15; margin: 0; let
 .chip.on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); box-shadow: 0 6px 14px -8px var(--primary); }
 
 .card { background: var(--surface); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow-sm); border: 1px solid var(--line); }
-.stack { display: grid; gap: 14px; }
+/* minmax(0, 1fr): um texto comprido numa linha só (ex.: última mensagem) não alarga a coluna além da tela. */
+.stack { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
 .pad { padding: 0 18px; }
 .muted { color: var(--muted); }
 .small { font-size: 13.5px; }
