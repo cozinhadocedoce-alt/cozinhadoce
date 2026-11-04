@@ -46,7 +46,8 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; }
-html { background: var(--bg); }
+/* Sem "puxar para atualizar": o Chrome do Android olha o html (quem rola a página), não só o body. */
+html { background: var(--bg); overscroll-behavior-y: none; }
 body {
   font-family: var(--font);
   color: var(--ink);
@@ -356,7 +357,7 @@ textarea.input { resize: vertical; min-height: 92px; }
 
 .chat-page { display: flex; flex-direction: column; height: 100dvh; }
 .chat-page .page-head { position: relative; }
-.chat-scroll { flex: 1; overflow-y: auto; padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
+.chat-scroll { flex: 1; overflow-y: auto; overscroll-behavior-y: contain; padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
 .chat-about { align-self: center; width: min(100%, 300px); background: var(--surface); border-radius: 22px; overflow: hidden; box-shadow: var(--shadow-sm); border: 1px solid var(--line); margin: 6px 0 14px; }
 .chat-about img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
 .chat-about div { padding: 10px 12px; font-size: 14px; }
@@ -406,7 +407,7 @@ textarea.input { resize: vertical; min-height: 92px; }
 /* ---------- Folha de baixo e aviso ---------- */
 .sheet-backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(30, 10, 16, .45); backdrop-filter: blur(3px); display: flex; align-items: flex-end; justify-content: center; animation: fade .2s both; }
 @keyframes fade { from { opacity: 0; } }
-.sheet { width: min(100%, 560px); max-height: 90dvh; overflow-y: auto; background: var(--bg); border-radius: 30px 30px 0 0; padding: 10px 20px calc(24px + var(--safe-b)); animation: up .35s cubic-bezier(.2, .9, .2, 1) both; }
+.sheet { width: min(100%, 560px); max-height: 90dvh; overflow-y: auto; overscroll-behavior-y: contain; background: var(--bg); border-radius: 30px 30px 0 0; padding: 10px 20px calc(24px + var(--safe-b)); animation: up .35s cubic-bezier(.2, .9, .2, 1) both; }
 @keyframes up { from { transform: translateY(100%); } }
 .sheet-grip { width: 44px; height: 5px; border-radius: 99px; background: var(--line); margin: 0 auto 16px; }
 .sheet h2 { font-size: 22px; margin-bottom: 8px; }
