@@ -5,5 +5,5 @@ export const CONFIG = {
   SUPABASE_URL: 'https://qaurhdtozcfwjhdvwysd.supabase.co',
   SUPABASE_ANON_KEY: 'sb_publishable_gVCeFcUEkc8s9RWhIgRacA_xQaTF4PC',
   // Chave pública das notificações (gere com: npx web-push generate-vapid-keys). A privada vai só para o Supabase.
-  VAPID_PUBLIC_KEY: '',
+  VAPID_PUBLIC_KEY: 'BIKFrsn7jtyF9UgZfZ0Moo_kCIgbLx4NJ0prh_vQ_DtRu3ZokYPfNLgBKxEQ8_bhim9YRR9farOQklonDVspdxE',
 };
