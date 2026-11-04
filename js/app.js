@@ -221,7 +221,7 @@ async function viewHome() {
     </header>
     ${configured ? '' : '<div class="demo-banner">🧪 <b>Modo demonstração.</b> Os dados ficam só neste navegador. Configure o Supabase para publicar de verdade (veja o README).</div>'}
     <div class="greet"><h1>Olá${u ? `, ${esc(firstName(u.name))}` : ''}! 👋<br>O que vai <em>adoçar</em> seu dia?</h1></div>
-    <a class="search-pill" href="#/buscar?foco=1">${I.search}<span>Buscar bolo, brigadeiro, torta…</span></a>
+    <a class="search-pill" href="#/buscar?foco=1">${I.search}<span>Buscar macaron, brownie, suspiro…</span></a>
 
     ${all.length ? `
     <section class="hero" aria-label="Destaques">
@@ -288,7 +288,7 @@ async function viewSearch(_, query) {
   $view.innerHTML = `<div class="page">
     <header class="page-head" style="flex-direction:column;align-items:stretch;gap:10px">
       <h1>Buscar</h1>
-      <label class="search-pill" style="margin:0">${I.search}<input id="q" class="grow" style="border:0;outline:0;background:none" type="search" enterkeyhint="search" placeholder="Bolo, brigadeiro, torta…" value="${esc(q)}" autocomplete="off"></label>
+      <label class="search-pill" style="margin:0">${I.search}<input id="q" class="grow" style="border:0;outline:0;background:none" type="search" enterkeyhint="search" placeholder="Macaron, brownie, suspiro…" value="${esc(q)}" autocomplete="off"></label>
     </header>
     <div class="chips" id="cats">
       <button class="chip ${cat ? '' : 'on'}" data-cat="">🍭 Todos</button>
