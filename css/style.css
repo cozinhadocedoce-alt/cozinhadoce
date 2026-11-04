@@ -74,7 +74,15 @@ h1, h2, h3 { font-family: var(--font-display); line-height: 1.15; margin: 0; let
 
 /* ---------- Carregando ---------- */
 .boot { min-height: 80dvh; display: grid; place-items: center; }
-.boot-cupcake { font-size: 64px; animation: bounce 1s ease-in-out infinite; }
+.boot-mac { width: 110px; overflow: visible; }
+.boot-mac .mac-top { animation: mac-top 1.1s cubic-bezier(.4, 0, .3, 1) infinite; transform-origin: 60px 60px; }
+.boot-mac .mac-fill { animation: mac-fill 1.1s ease-in-out infinite; transform-origin: 60px 60px; }
+.boot-mac .mac-bot { animation: mac-bot 1.1s ease-in-out infinite; transform-origin: 60px 80px; }
+.boot-mac .mac-shadow { fill: var(--primary); opacity: .18; animation: mac-shadow 1.1s ease-in-out infinite; transform-origin: 60px 104px; }
+@keyframes mac-top { 0%, 100% { transform: translateY(0) rotate(0); } 45% { transform: translateY(-26px) rotate(-8deg); } 60% { transform: translateY(-26px) rotate(-8deg); } }
+@keyframes mac-fill { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(1.12); } }
+@keyframes mac-bot { 0%, 100% { transform: scaleY(1); } 50%, 90% { transform: scaleY(1); } 95% { transform: scaleY(.94); } }
+@keyframes mac-shadow { 0%, 100% { transform: scaleX(1); } 50% { transform: scaleX(.8); opacity: .1; } }
 @keyframes bounce { 50% { transform: translateY(-14px) rotate(-6deg); } }
 .skeleton { background: linear-gradient(90deg, var(--surface-2), var(--line), var(--surface-2)); background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: var(--radius); }
 @keyframes shimmer { to { background-position: -200% 0; } }

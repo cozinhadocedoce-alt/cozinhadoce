@@ -6,7 +6,7 @@ const svg = readFileSync('icons/icon.svg', 'utf8');
 const square = svg.replaceAll('rx="112"', 'rx="0"'); // iPhone e Android recortam o formato sozinhos
 const maskable = square.replace('<g id="desenho">', '<g id="desenho" transform="translate(256 256) scale(0.78) translate(-256 -256)">');
 // Selo monocromático da barra de notificações do Android (só o contorno conta).
-const badge = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="#fff" d="M150 284h212l-26 128a24 24 0 0 1-23.5 19h-113A24 24 0 0 1 176 412z"/><path fill="#fff" d="M140 276c-22-4-30-40-6-54-14-30 14-60 44-50 4-36 46-56 76-36 30-20 72 0 76 36 30-10 58 20 44 50 24 14 16 50-6 54z"/><circle fill="#fff" cx="256" cy="126" r="30"/></svg>`;
+const badge = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><g fill="#fff"><path d="M86 236 C86 100 426 100 426 236 Z"/><rect x="96" y="248" width="320" height="44" rx="14"/><path d="M90 304 L422 304 C422 390 90 390 90 304 Z"/></g></svg>`;
 
 const ICONS = [
   ['icons/icon-512.png', svg, 512],

@@ -1,6 +1,6 @@
 // Service worker: abre rápido, funciona com internet ruim e mostra as notificações.
 // Arquivos do app: rede primeiro, cache como reserva. Dados do Supabase: sempre da rede.
-const CACHE = 'cozinha-doce-v3';
+const CACHE = 'cozinha-doce-v4';
 const SHELL = [
   './',
   'index.html',
