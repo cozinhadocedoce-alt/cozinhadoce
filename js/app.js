@@ -1,0 +1,1396 @@
+// Cozinha Doce — telas, rotas e interações.
+import { createApi, configured } from './api.js';
+import { resizePhoto, squareIcon, blobToBase64 } from './image.js';
+import { pushSupport, pushActive, enablePush, disablePush, syncPush, isStandalone } from './push.js';
+
+// ===== Sem zoom (pinça e toque duplo) =====
+['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
+document.addEventListener('touchmove', (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+
+const $view = document.getElementById('view');
+const $tabbar = document.getElementById('tabbar');
+const $badge = document.getElementById('chat-badge');
+let api;
+let settings = {};
+let categories = [];
+let favIds = new Set();
+let unreadCount = 0;
+let stopRealtime = null;
+let cleanups = [];
+const chatHandlers = new Set();
+let installPrompt = null;
+
+// ===================================================================
+// Utilidades
+// ===================================================================
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (v) => (v == null || v === '' ? 'Sob consulta' : Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }));
+const catOf = (slug) => categories.find((c) => c.slug === slug);
+const firstName = (n) => String(n || '').trim().split(/\s+/)[0];
+const initials = (n) => (String(n || '?').trim()[0] || '?').toUpperCase();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const user = () => api.user;
+const isAdmin = () => api.isAdmin;
+const parsePrice = (s) => {
+  const t = String(s ?? '').replace(/[^\d,.]/g, '');
+  if (!t) return null;
+  const n = Number(t.includes(',') ? t.replace(/\./g, '').replace(',', '.') : t);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+};
+const fmtTime = (iso) => {
+  const d = new Date(iso);
+  const now = new Date();
+  const days = Math.floor((new Date(now.toDateString()) - new Date(d.toDateString())) / 864e5);
+  if (days === 0) return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  if (days === 1) return 'ontem';
+  if (days < 7) return d.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '');
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+};
+const fmtDay = (iso) => {
+  const d = new Date(iso);
+  const days = Math.floor((new Date(new Date().toDateString()) - new Date(d.toDateString())) / 864e5);
+  return days === 0 ? 'Hoje' : days === 1 ? 'Ontem' : d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long' });
+};
+const fmtPhone = (d) => {
+  d = String(d || '').replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '');
+  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return d;
+};
+const waLink = (digits, text) => {
+  let d = String(digits || '').replace(/\D/g, '');
+  if (d.length <= 11) d = '55' + d;
+  return `https://wa.me/${d}?text=${encodeURIComponent(text)}`;
+};
+const slugify = (s) => String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 30);
+const appIcon = (big) => (big ? settings.icon_url : settings.icon_192_url || settings.icon_url) || (big ? 'icons/icon-512.png' : 'icons/icon-192.png');
+
+const I = {
+  back: '<svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>',
+  heart: '<svg viewBox="0 0 24 24"><path d="M12 20.5s-7.5-4.6-9.3-9.2C1.4 7.9 3.6 4.5 7 4.5c2 0 3.6 1.1 5 2.9 1.4-1.8 3-2.9 5-2.9 3.4 0 5.6 3.4 4.3 6.8-1.8 4.6-9.3 9.2-9.3 9.2z"/></svg>',
+  share: '<svg viewBox="0 0 24 24"><path d="M12 3v12M7 8l5-5 5 5"/><path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>',
+  chat: '<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.6A8 8 0 1 1 21 12z"/></svg>',
+  send: '<svg viewBox="0 0 24 24"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12.6 2-12.6 2z"/></svg>',
+  search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></svg>',
+  edit: '<svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
+  whats: '<svg viewBox="0 0 24 24" style="fill:currentColor;stroke:none"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2zm5.2 14.1c-.2.6-1.3 1.2-1.8 1.3-.5 0-1 .3-3.3-.7-2.8-1.1-4.5-4-4.7-4.2-.1-.2-1.1-1.5-1.1-2.9s.7-2 1-2.3c.2-.3.5-.3.7-.3h.5c.2 0 .4 0 .6.5l.9 2.1c.1.2.1.4 0 .6l-.4.6-.4.4c-.1.2-.3.3-.1.6.2.3.8 1.3 1.7 2.1 1.2 1 2.1 1.3 2.4 1.5.3.1.5.1.7-.1l1-1.2c.2-.3.4-.2.7-.1l2 1c.3.1.5.2.5.3.1.2.1.7-.1 1.3z"/></svg>',
+  google: '<svg viewBox="0 0 48 48" width="20" height="20"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>',
+};
+
+function toast(msg, ms = 2600) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove('show'), ms);
+}
+const fail = (err) => { console.error(err); toast(err?.message || 'Algo deu errado. Tente de novo.', 4000); };
+
+// Folha que sobe de baixo. Devolve { el, close }.
+function sheet(html) {
+  const root = document.getElementById('sheet-root');
+  const back = document.createElement('div');
+  back.className = 'sheet-backdrop';
+  back.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div class="sheet-grip"></div>${html}</div>`;
+  const close = () => back.remove();
+  back.addEventListener('click', (e) => { if (e.target === back || e.target.closest('[data-close]')) close(); });
+  root.append(back);
+  return { el: back.querySelector('.sheet'), close };
+}
+function confirmSheet(title, text, okLabel = 'Confirmar', danger = false) {
+  return new Promise((resolve) => {
+    const s = sheet(`<h2>${esc(title)}</h2><p class="muted">${esc(text)}</p>
+      <div class="stack" style="margin-top:18px"><button class="btn block ${danger ? 'danger' : ''}" data-ok>${esc(okLabel)}</button>
+      <button class="btn ghost block" data-close>Cancelar</button></div>`);
+    s.el.querySelector('[data-ok]').onclick = () => { s.close(); resolve(true); };
+    s.el.parentElement.addEventListener('click', (e) => { if (e.target === s.el.parentElement || e.target.closest('[data-close]')) resolve(false); });
+  });
+}
+const googleBtn = (label = 'Entrar com o Google') => `<button class="btn btn-google block" data-login>${I.google} ${esc(label)}</button>`;
+// Pede login quando a ação precisa de conta. Devolve true se já estiver logado.
+function needLogin(reason) {
+  if (user()) return true;
+  sheet(`<div class="center" style="font-size:52px">🍰</div><h2 class="center">Entre para continuar</h2>
+    <p class="muted center">${esc(reason)}</p><div style="margin-top:18px">${googleBtn()}</div>
+    ${configured ? '' : '<p class="small muted center">Modo demonstração: entra sem senha, só neste navegador.</p>'}`);
+  return false;
+}
+const loginGate = (emoji, title, text) => `<section class="page empty" style="padding-top:60px"><div class="e">${emoji}</div><h2>${esc(title)}</h2>
+  <p class="muted">${esc(text)}</p><div style="width:100%;max-width:340px;margin-top:8px">${googleBtn()}</div></section>`;
+const pageHead = (title, { back = true, right = '' } = {}) => `<header class="page-head">
+  ${back ? `<button class="icon-btn" data-back aria-label="Voltar">${I.back}</button>` : ''}<h1>${esc(title)}</h1>${right}</header>`;
+const emptyBox = (emoji, title, text, extra = '') => `<div class="empty"><div class="e">${emoji}</div><h2>${esc(title)}</h2><p class="muted">${text}</p>${extra}</div>`;
+
+// ===================================================================
+// Aparência
+// ===================================================================
+function applySettings(s) {
+  settings = s;
+  const root = document.documentElement;
+  root.style.setProperty('--primary', s.primary_color);
+  try { localStorage.setItem('cd-cor', s.primary_color); } catch {}
+  document.querySelector('meta[name="theme-color"]').content = s.primary_color;
+  document.title = `${s.app_name} — ${s.tagline}`;
+  document.querySelector('meta[name="apple-mobile-web-app-title"]').content = s.app_name;
+  document.getElementById('favicon-link').href = appIcon(false);
+  document.getElementById('apple-icon-link').href = s.icon_url || 'icons/apple-touch-icon.png';
+  const m = api.manifestUrl();
+  if (m) document.getElementById('manifest-link').href = m;
+}
+function applyTheme() {
+  let t = '';
+  try { t = localStorage.getItem('cd-tema') || ''; } catch {}
+  if (t) document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+}
+
+// ===================================================================
+// Cartões e favoritos
+// ===================================================================
+const heartBtn = (id, cls = 'heart') => `<button class="${cls} ${favIds.has(id) ? 'on' : ''}" data-fav="${esc(id)}" aria-label="Favoritar">${I.heart}</button>`;
+const productCard = (p) => `<a class="pcard" href="#/doce/${esc(p.id)}">
+  <div class="pcard-img"><img loading="lazy" src="${esc(p.photos[0] || '')}" alt="${esc(p.title)}">
+    ${p.featured ? '<span class="ribbon">⭐ Destaque</span>' : ''}${p.photos.length > 1 ? `<span class="more-photos">📷 ${p.photos.length}</span>` : ''}</div>
+  ${heartBtn(p.id)}
+  <div class="pcard-body"><div class="pcard-title">${esc(p.title)}</div><div class="pcard-price">${money(p.price)}</div></div></a>`;
+const wideCard = (p) => `<a class="wide-card" href="#/doce/${esc(p.id)}"><img loading="lazy" src="${esc(p.photos[0] || '')}" alt="">
+  <div class="grow"><div class="pcard-title">${esc(p.title)}</div><div class="pcard-price">${money(p.price)}</div>
+  <div class="small muted" style="margin-top:2px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden">${esc(p.description)}</div></div></a>`;
+
+async function toggleFav(id) {
+  if (!needLogin('Assim seus doces favoritos ficam guardados na sua conta.')) return;
+  const on = !favIds.has(id);
+  on ? favIds.add(id) : favIds.delete(id);
+  document.querySelectorAll(`[data-fav="${CSS.escape(id)}"]`).forEach((b) => {
+    b.classList.toggle('on', on);
+    b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
+  });
+  if (navigator.vibrate) navigator.vibrate(12);
+  try {
+    await api.setFavorite(id, on);
+    toast(on ? 'Guardado nos favoritos ❤️' : 'Tirado dos favoritos');
+  } catch (err) {
+    on ? favIds.delete(id) : favIds.add(id);
+    fail(err);
+  }
+}
+
+async function startChat(productId, photoUrl) {
+  if (!needLogin('Para conversar sobre esta foto com a gente.')) return;
+  try {
+    const id = await api.startConversation(productId, photoUrl);
+    location.hash = `#/chat/${id}`;
+  } catch (err) { fail(err); }
+}
+
+// Cliques globais
+document.addEventListener('click', async (e) => {
+  const fav = e.target.closest('[data-fav]');
+  if (fav) { e.preventDefault(); e.stopPropagation(); toggleFav(fav.dataset.fav); return; }
+  if (e.target.closest('[data-login]')) {
+    e.preventDefault();
+    try {
+      await api.signIn();
+      document.querySelectorAll('.sheet-backdrop').forEach((b) => b.remove());
+    } catch (err) { fail(err); }
+    return;
+  }
+  if (e.target.closest('[data-back]')) {
+    e.preventDefault();
+    if (sessionStorage.getItem('cd-nav')) history.back(); // veio de outra tela do app
+    else location.hash = '#/';
+  }
+});
+
+// ===================================================================
+// Início
+// ===================================================================
+async function viewHome() {
+  const all = await api.listProducts({ limit: 300 });
+  let featured = all.filter((p) => p.featured);
+  if (featured.length < 2) featured = [...featured, ...all.filter((p) => !p.featured)].slice(0, 5);
+  const used = categories.filter((c) => all.some((p) => p.category === c.slug));
+  const rows = used.map((c) => [c, all.filter((p) => p.category === c.slug)]).filter(([, l]) => l.length >= 2).slice(0, 3);
+  const u = user();
+
+  $view.innerHTML = `<div class="page">
+    <header class="home-head">
+      <div class="brand"><img class="brand-logo" src="${esc(appIcon(false))}" alt="">
+        <div style="min-width:0"><div class="brand-name">${esc(settings.app_name)}</div><div class="brand-tag">${esc(settings.tagline)}</div></div></div>
+      <a href="#/menu" aria-label="Menu">${u?.avatar ? `<img class="avatar" src="${esc(u.avatar)}" alt="" referrerpolicy="no-referrer">` : `<span class="avatar">${u ? initials(u.name) : '👤'}</span>`}</a>
+    </header>
+    ${configured ? '' : '<div class="demo-banner">🧪 <b>Modo demonstração.</b> Os dados ficam só neste navegador. Configure o Supabase para publicar de verdade (veja o README).</div>'}
+    <div class="greet"><h1>Olá${u ? `, ${esc(firstName(u.name))}` : ''}! 👋<br>O que vai <em>adoçar</em> seu dia?</h1></div>
+    <a class="search-pill" href="#/buscar?foco=1">${I.search}<span>Buscar bolo, brigadeiro, torta…</span></a>
+
+    ${all.length ? `
+    <section class="hero" aria-label="Destaques">
+      <div class="hero-track" id="hero">${featured.map((p, i) => `
+        <a class="hero-card ${i === 0 ? 'is-active' : ''}" href="#/doce/${esc(p.id)}" data-i="${i}">
+          <img src="${esc(p.photos[0])}" alt="" ${i ? 'loading="lazy"' : ''}>
+          <div class="hero-info"><span class="kicker">${p.featured ? '⭐ Destaque' : '✨ Novidade'}</span><h2>${esc(p.title)}</h2>
+          <div class="row"><b style="font-size:20px">${money(p.price)}</b><span class="hero-cta">Ver doce →</span></div></div>
+        </a>`).join('')}</div>
+      <div class="dots" id="hero-dots">${featured.map((_, i) => `<i class="${i === 0 ? 'on' : ''}"></i>`).join('')}</div>
+    </section>
+
+    <div class="stories" aria-label="Categorias">${used.map((c) => `
+      <a class="story" href="#/buscar?cat=${esc(c.slug)}"><span class="story-ring"><span>${esc(c.emoji)}</span></span>${esc(c.name)}</a>`).join('')}</div>
+
+    <section class="section"><div class="section-title"><h2>Fresquinhos ✨</h2><a href="#/buscar">Ver tudo</a></div>
+      <div class="hscroll">${all.slice(0, 10).map(productCard).join('')}</div></section>
+
+    ${!isAdmin() ? `<section class="pad section"><a class="chat-photo-cta" href="#/adicionar" style="margin:0">
+      <span style="font-size:38px">💌</span><div class="grow"><b>Quer algo especial?</b><div class="small muted">Mande a foto de uma inspiração e a gente faz sob encomenda.</div></div><span class="chev">›</span></a></section>` : ''}
+
+    ${rows.map(([c, list]) => `<section class="section"><div class="section-title"><h2>${esc(c.emoji)} ${esc(c.name)}</h2><a href="#/buscar?cat=${esc(c.slug)}">Ver todos</a></div>
+      <div class="hscroll">${list.slice(0, 8).map(wideCard).join('')}</div></section>`).join('')}
+
+    <section class="section"><div class="section-title"><h2>Todos os doces</h2><span class="small muted">${all.length} ${all.length === 1 ? 'opção' : 'opções'}</span></div>
+      <div class="grid">${all.map(productCard).join('')}</div></section>`
+    : emptyBox('🧁', 'O cardápio está saindo do forno', isAdmin() ? 'Adicione as fotos dos seus doces e a IA ajuda a preencher tudo.' : 'Volte em breve para ver as delícias.',
+      isAdmin() ? '<a class="btn" href="#/adicionar">Adicionar doces</a>' : '')}
+  </div>`;
+
+  // Carrossel: marca o cartão do meio e passa sozinho a cada 4,5 s (para quando a pessoa toca).
+  const track = document.getElementById('hero');
+  if (!track) return;
+  const cards = [...track.children];
+  const dots = [...document.getElementById('hero-dots').children];
+  let current = 0;
+  const io = new IntersectionObserver((entries) => entries.forEach((en) => {
+    if (en.isIntersecting && en.intersectionRatio > 0.6) {
+      current = Number(en.target.dataset.i);
+      cards.forEach((c, i) => c.classList.toggle('is-active', i === current));
+      dots.forEach((d, i) => d.classList.toggle('on', i === current));
+    }
+  }), { root: track, threshold: [0.6] });
+  cards.forEach((c) => io.observe(c));
+  let paused = false;
+  const pause = () => { paused = true; clearTimeout(pause.t); pause.t = setTimeout(() => (paused = false), 8000); };
+  track.addEventListener('touchstart', pause, { passive: true });
+  track.addEventListener('pointerdown', pause);
+  const timer = setInterval(() => {
+    if (paused || document.hidden || cards.length < 2) return;
+    const next = cards[(current + 1) % cards.length];
+    track.scrollTo({ left: next.offsetLeft - (track.clientWidth - next.clientWidth) / 2, behavior: 'smooth' });
+  }, 4500);
+  cleanups.push(() => { clearInterval(timer); io.disconnect(); });
+}
+
+// ===================================================================
+// Buscar
+// ===================================================================
+async function viewSearch(_, query) {
+  let q = query.get('q') || '';
+  let cat = query.get('cat') || '';
+  let sort = query.get('ordem') || 'recent';
+  $view.innerHTML = `<div class="page">
+    <header class="page-head" style="flex-direction:column;align-items:stretch;gap:10px">
+      <h1>Buscar</h1>
+      <label class="search-pill" style="margin:0">${I.search}<input id="q" class="grow" style="border:0;outline:0;background:none" type="search" enterkeyhint="search" placeholder="Bolo, brigadeiro, torta…" value="${esc(q)}" autocomplete="off"></label>
+    </header>
+    <div class="chips" id="cats">
+      <button class="chip ${cat ? '' : 'on'}" data-cat="">🍭 Todos</button>
+      ${categories.map((c) => `<button class="chip ${c.slug === cat ? 'on' : ''}" data-cat="${esc(c.slug)}">${esc(c.emoji)} ${esc(c.name)}</button>`).join('')}
+    </div>
+    <div class="row between pad" style="margin:6px 0 12px">
+      <span class="small muted" id="count"></span>
+      <select id="sort" class="input" style="width:auto;padding:8px 12px;font-size:14px;font-weight:700">
+        <option value="recent">Mais novos</option><option value="price_asc">Menor preço</option><option value="price_desc">Maior preço</option>
+      </select>
+    </div>
+    <div id="results"></div>
+  </div>`;
+  const $q = document.getElementById('q');
+  const $results = document.getElementById('results');
+  document.getElementById('sort').value = sort;
+  if (query.get('foco')) setTimeout(() => $q.focus(), 50);
+  const chipOn = document.querySelector('#cats .chip.on');
+  chipOn?.scrollIntoView({ inline: 'center', block: 'nearest' });
+
+  let seq = 0;
+  const run = async () => {
+    const my = ++seq;
+    const params = new URLSearchParams();
+    if (q) params.set('q', q);
+    if (cat) params.set('cat', cat);
+    if (sort !== 'recent') params.set('ordem', sort);
+    history.replaceState(null, '', `#/buscar${params.size ? '?' + params : ''}`);
+    $results.innerHTML = `<div class="grid">${'<div class="skeleton" style="height:220px"></div>'.repeat(4)}</div>`;
+    try {
+      const list = await api.listProducts({ q, category: cat || undefined, sort });
+      if (my !== seq) return;
+      document.getElementById('count').textContent = `${list.length} ${list.length === 1 ? 'doce encontrado' : 'doces encontrados'}`;
+      $results.innerHTML = list.length ? `<div class="grid">${list.map(productCard).join('')}</div>`
+        : emptyBox('🔍', 'Nada por aqui', q ? `Não achamos "${esc(q)}". Que tal pedir sob encomenda?` : 'Ainda não há doces nesta categoria.',
+          '<a class="btn soft" href="#/adicionar">💌 Pedir sob encomenda</a>');
+    } catch (err) { fail(err); }
+  };
+  let t;
+  $q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { q = $q.value.trim(); run(); }, 280); });
+  document.getElementById('cats').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-cat]');
+    if (!b) return;
+    cat = b.dataset.cat;
+    document.querySelectorAll('#cats .chip').forEach((c) => c.classList.toggle('on', c === b));
+    b.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+    run();
+  });
+  document.getElementById('sort').addEventListener('change', (e) => { sort = e.target.value; run(); });
+  run();
+}
+
+// ===================================================================
+// Página do doce
+// ===================================================================
+async function viewProduct([id]) {
+  const p = await api.getProduct(id);
+  if (!p || (p.status !== 'published' && !isAdmin())) {
+    $view.innerHTML = pageHead('Doce') + emptyBox('🥲', 'Este doce saiu do cardápio', 'Mas tem muita coisa gostosa esperando por você.', '<a class="btn" href="#/">Ver o cardápio</a>');
+    return;
+  }
+  const cat = catOf(p.category);
+  const link = `${location.origin}${location.pathname}#/doce/${p.id}`;
+  $view.innerHTML = `<div class="page">
+    <div class="gallery">
+      <div class="gallery-top">
+        <button class="icon-btn glass" data-back aria-label="Voltar">${I.back}</button>
+        <div class="row"><button class="icon-btn glass" id="share" aria-label="Compartilhar">${I.share}</button>${heartBtn(p.id, 'heart')}</div>
+      </div>
+      <div class="gallery-track" id="gal">${p.photos.map((u, i) => `<img src="${esc(u)}" alt="${esc(p.title)} — foto ${i + 1}" ${i ? 'loading="lazy"' : ''}>`).join('')}</div>
+      ${p.photos.length > 1 ? `<span class="gallery-count" id="gal-count">1/${p.photos.length}</span>` : ''}
+    </div>
+    <article class="detail">
+      ${p.status !== 'published' ? '<p class="demo-banner" style="margin:0 0 12px">📝 Rascunho — só você está vendo.</p>' : ''}
+      ${cat ? `<a class="cat" href="#/buscar?cat=${esc(cat.slug)}">${esc(cat.emoji)} ${esc(cat.name)}</a>` : ''}
+      <h1>${esc(p.title)}</h1>
+      <div class="price-tag">${money(p.price)}</div>
+      ${p.photos.length > 1 ? `<div class="thumbs" id="thumbs">${p.photos.map((u, i) => `<button class="${i ? '' : 'on'}" data-i="${i}" aria-label="Foto ${i + 1}"><img src="${esc(u)}" alt=""></button>`).join('')}</div>` : ''}
+      <p class="desc">${esc(p.description)}</p>
+
+      <button class="chat-photo-cta" id="chat-photo" style="width:100%;text-align:left">
+        <img id="chat-thumb" src="${esc(p.photos[0])}" alt="">
+        <div class="grow"><b>Conversar sobre esta foto</b><div class="small muted">Tire dúvidas, combine sabores, tamanho e entrega.</div></div>
+        <span class="icon-btn" style="background:var(--primary);color:var(--on-primary);border:0">${I.chat}</span>
+      </button>
+      ${settings.whatsapp ? `<a class="btn whats block" target="_blank" rel="noopener" href="${esc(waLink(settings.whatsapp, `Olá! Tenho interesse em: ${p.title} (${money(p.price)})\n${link}`))}">${I.whats} Pedir pelo WhatsApp</a>` : ''}
+
+      ${isAdmin() ? `<div class="admin-bar">
+        <a class="btn sm soft" href="#/editar/${esc(p.id)}">${I.edit} Editar</a>
+        <button class="btn sm ghost" id="feat">${p.featured ? '⭐ Tirar destaque' : '☆ Destacar'}</button>
+        ${p.status === 'published' ? '<button class="btn sm ghost" id="unpub">🙈 Despublicar</button>' : ''}
+      </div>` : ''}
+    </article>
+    <section class="section" id="related"></section>
+  </div>`;
+
+  const gal = document.getElementById('gal');
+  let idx = 0;
+  const setIdx = (i) => {
+    idx = i;
+    document.getElementById('chat-thumb').src = p.photos[i];
+    const c = document.getElementById('gal-count');
+    if (c) c.textContent = `${i + 1}/${p.photos.length}`;
+    document.querySelectorAll('#thumbs button').forEach((b, j) => b.classList.toggle('on', j === i));
+  };
+  gal.addEventListener('scroll', () => {
+    const i = Math.round(gal.scrollLeft / gal.clientWidth);
+    if (i !== idx && p.photos[i]) setIdx(i);
+  }, { passive: true });
+  document.getElementById('thumbs')?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-i]');
+    if (b) gal.scrollTo({ left: gal.clientWidth * Number(b.dataset.i), behavior: 'smooth' });
+  });
+  document.getElementById('chat-photo').onclick = () => startChat(p.id, p.photos[idx]);
+  document.getElementById('share').onclick = async () => {
+    try {
+      if (navigator.share) await navigator.share({ title: p.title, text: `${p.title} — ${money(p.price)}`, url: link });
+      else { await navigator.clipboard.writeText(link); toast('Link copiado 🔗'); }
+    } catch {}
+  };
+  document.getElementById('feat')?.addEventListener('click', async () => {
+    try { await api.saveProduct({ id: p.id, featured: !p.featured }); toast(p.featured ? 'Saiu dos destaques' : 'Agora está nos destaques ⭐'); render(); } catch (err) { fail(err); }
+  });
+  document.getElementById('unpub')?.addEventListener('click', async () => {
+    if (!(await confirmSheet('Despublicar este doce?', 'Ele sai do cardápio e volta para os rascunhos. Você pode publicar de novo quando quiser.', 'Despublicar'))) return;
+    try { await api.saveProduct({ id: p.id, status: 'draft' }); toast('Voltou para os rascunhos'); location.hash = '#/revisar'; } catch (err) { fail(err); }
+  });
+
+  if (p.category) {
+    const rel = (await api.listProducts({ category: p.category, limit: 12 })).filter((x) => x.id !== p.id);
+    if (rel.length) document.getElementById('related').innerHTML = `<div class="section-title"><h2>Você também vai amar 💕</h2></div><div class="hscroll">${rel.map(productCard).join('')}</div>`;
+  }
+}
+
+// ===================================================================
+// Adicionar
+// ===================================================================
+async function viewAdd() {
+  if (!user()) { $view.innerHTML = loginGate('💌', 'Peça sob encomenda', 'Entre com o Google para mandar a foto de uma inspiração e conversar com a gente.'); return; }
+  if (!isAdmin()) return viewCustomOrder();
+
+  const drafts = await api.listProducts({ status: 'draft' });
+  let mode = 'cada';
+  let useAI = api.aiAvailable;
+  $view.innerHTML = `<div class="page">
+    ${pageHead('Adicionar doces', { back: false })}
+    <div class="pad stack">
+      ${drafts.length ? `<a class="chat-photo-cta" href="#/revisar" style="margin:0"><span style="font-size:32px">📝</span>
+        <div class="grow"><b>${drafts.length} ${drafts.length === 1 ? 'rascunho esperando' : 'rascunhos esperando'} revisão</b><div class="small muted">Confira e publique</div></div><span>›</span></a>` : ''}
+
+      <label class="drop" id="drop">
+        <span class="big">📸</span>
+        <b>Escolha várias fotos de uma vez</b>
+        <span class="muted small">Toque para abrir a galeria ou arraste as fotos aqui.<br>${useAI ? 'A IA do Google já preenche título, valor, descrição e categoria.' : 'Depois você preenche os dados de cada doce.'}</span>
+        <input type="file" id="files" accept="image/*" multiple hidden>
+      </label>
+
+      <div class="card stack">
+        <div class="field"><span>Como separar as fotos?</span>
+          <div class="segmented" id="mode"><button class="on" data-m="cada">1 foto = 1 doce</button><button data-m="junto">Todas = 1 doce</button></div></div>
+        <div class="switch-row" style="padding:0">
+          <div class="grow"><b>✨ Preencher com a IA do Google</b><div class="small muted">${api.aiAvailable ? 'Você revisa tudo antes de publicar.' : 'Disponível com o Supabase configurado.'}</div></div>
+          <label class="switch"><input type="checkbox" id="ai" ${useAI ? 'checked' : ''} ${api.aiAvailable ? '' : 'disabled'}><i></i></label>
+        </div>
+      </div>
+
+      <div class="progress-list" id="progress"></div>
+      <div id="done"></div>
+      <button class="btn ghost block" id="manual">✍️ Criar um doce preenchendo à mão</button>
+    </div>
+  </div>`;
+
+  const $files = document.getElementById('files');
+  const $drop = document.getElementById('drop');
+  document.getElementById('mode').onclick = (e) => {
+    const b = e.target.closest('[data-m]');
+    if (!b) return;
+    mode = b.dataset.m;
+    document.querySelectorAll('#mode button').forEach((x) => x.classList.toggle('on', x === b));
+  };
+  document.getElementById('ai').onchange = (e) => (useAI = e.target.checked);
+  document.getElementById('manual').onclick = async () => {
+    try { await api.saveProduct({ status: 'draft' }); location.hash = '#/revisar'; } catch (err) { fail(err); }
+  };
+  $files.onchange = () => { if ($files.files.length) processBatch([...$files.files], mode, useAI); $files.value = ''; };
+  ['dragenter', 'dragover'].forEach((t) => $drop.addEventListener(t, (e) => { e.preventDefault(); $drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((t) => $drop.addEventListener(t, () => $drop.classList.remove('over')));
+  $drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('image/') || /\.hei[cf]$/i.test(f.name));
+    if (files.length) processBatch(files, mode, useAI);
+  });
+}
+
+const catMap = () => Object.fromEntries(categories.map((c) => [c.slug, c.name]));
+
+async function aiFor(blobOrFile) {
+  const small = await resizePhoto(blobOrFile, 768, 0.8);
+  return api.aiFill(await blobToBase64(small), catMap());
+}
+const aiPatch = (r) => {
+  const patch = { ai_fields: [] };
+  if (r.title) { patch.title = r.title; patch.ai_fields.push('title'); }
+  if (r.description) { patch.description = r.description; patch.ai_fields.push('description'); }
+  if (r.category) { patch.category = r.category; patch.ai_fields.push('category'); }
+  if (r.price != null) { patch.price = r.price; patch.ai_fields.push('price'); }
+  return patch;
+};
+
+// Envia as fotos em lote: reduz, sobe, cria os rascunhos e pede à IA o primeiro preenchimento.
+async function processBatch(files, mode, useAI) {
+  const $p = document.getElementById('progress');
+  const $done = document.getElementById('done');
+  $done.innerHTML = '';
+  if (files.length > 40) { toast('Escolha até 40 fotos por vez.'); files = files.slice(0, 40); }
+  const items = files.map((f, i) => {
+    const el = document.createElement('div');
+    el.className = 'progress-item';
+    el.innerHTML = `<img src="${URL.createObjectURL(f)}" alt=""><div class="grow"><div class="small"><b>Foto ${i + 1}</b> · <span data-s>na fila…</span></div><div class="bar"><i></i></div></div><span class="spin" hidden></span>`;
+    $p.append(el);
+    const set = (txt, pct, busy = true) => {
+      el.querySelector('[data-s]').textContent = txt;
+      el.querySelector('.bar i').style.width = pct + '%';
+      el.querySelector('.spin').hidden = !busy;
+    };
+    return { file: f, set, url: null };
+  });
+  window.scrollTo({ top: $p.offsetTop - 80, behavior: 'smooth' });
+
+  let created = 0;
+  let aiErrors = 0;
+  const work = async (it) => {
+    try {
+      it.set('preparando…', 15);
+      const blob = await resizePhoto(it.file);
+      it.set('enviando…', 40);
+      it.url = await api.uploadPhoto(blob, 'produtos');
+      if (mode === 'junto') { it.set('enviada ✓', 100, false); return; }
+      let draft = await api.saveProduct({ status: 'draft', photos: [it.url] });
+      created++;
+      if (useAI) {
+        it.set('✨ a IA está olhando o doce…', 70);
+        try { draft = await api.saveProduct({ id: draft.id, ...aiPatch(await aiFor(blob)) }); } catch (err) { aiErrors++; console.warn(err); it.set(`sem IA: ${err.message}`, 90); await sleep(600); }
+      }
+      it.set(draft.title ? `pronto: ${draft.title}` : 'pronto para revisar', 100, false);
+    } catch (err) {
+      it.set(`erro: ${err.message}`, 100, false);
+    }
+  };
+  // Duas fotos por vez: rápido sem travar o celular.
+  const queue = [...items];
+  await Promise.all([0, 1].map(async () => { while (queue.length) await work(queue.shift()); }));
+
+  if (mode === 'junto') {
+    const urls = items.map((i) => i.url).filter(Boolean);
+    if (urls.length) {
+      let draft = await api.saveProduct({ status: 'draft', photos: urls });
+      created = 1;
+      if (useAI) {
+        items[0].set('✨ a IA está olhando o doce…', 90);
+        try { draft = await api.saveProduct({ id: draft.id, ...aiPatch(await aiFor(items[0].file)) }); } catch (err) { aiErrors++; toast(`IA: ${err.message}`); }
+        items[0].set(draft.title ? `pronto: ${draft.title}` : 'pronto para revisar', 100, false);
+      }
+    }
+  }
+  if (!created) return;
+  if (aiErrors) toast(`A IA não preencheu ${aiErrors} ${aiErrors === 1 ? 'foto' : 'fotos'}: complete à mão na revisão.`, 4500);
+  $done.innerHTML = `<a class="btn block" href="#/revisar">Revisar e publicar (${created}) →</a>`;
+  confetti();
+}
+
+// Cliente: encomenda personalizada a partir de uma foto de inspiração.
+function viewCustomOrder() {
+  let file = null;
+  $view.innerHTML = `<div class="page">
+    ${pageHead('Encomenda especial', { back: false })}
+    <div class="pad stack">
+      <p class="muted" style="margin:0">Viu um doce lindo por aí ou tem uma ideia para a sua festa? Mande a foto e conte o que precisa. A conversa fica ligada a essa foto. 💕</p>
+      <label class="drop" id="drop"><span class="big" id="ins-emoji">🖼️</span><img id="ins-prev" hidden style="max-height:240px;border-radius:18px">
+        <b>Escolher foto de inspiração</b><span class="small muted">Da galeria ou da câmera</span>
+        <input type="file" id="ins" accept="image/*" hidden></label>
+      <label class="field"><span>O que você precisa?</span>
+        <textarea class="input" id="ins-text" rows="4" maxlength="1500" placeholder="Ex.: Bolo para 30 pessoas, tema jardim, para o dia 20. Massa de chocolate, se possível!"></textarea></label>
+      <button class="btn block" id="ins-send" disabled>💬 Enviar e conversar</button>
+    </div>
+  </div>`;
+  const $send = document.getElementById('ins-send');
+  const $text = document.getElementById('ins-text');
+  const check = () => ($send.disabled = !file || !$text.value.trim());
+  document.getElementById('ins').onchange = (e) => {
+    file = e.target.files[0] || null;
+    const prev = document.getElementById('ins-prev');
+    if (file) { prev.src = URL.createObjectURL(file); prev.hidden = false; document.getElementById('ins-emoji').hidden = true; }
+    check();
+  };
+  $text.oninput = check;
+  $send.onclick = async () => {
+    $send.disabled = true;
+    $send.innerHTML = '<span class="spin"></span> Enviando…';
+    try {
+      const url = await api.uploadPhoto(await resizePhoto(file), 'encomendas');
+      const id = await api.startConversation(null, url);
+      await api.sendMessage(id, $text.value.trim());
+      location.hash = `#/chat/${id}`;
+    } catch (err) { fail(err); check(); $send.textContent = '💬 Enviar e conversar'; }
+  };
+}
+
+// ===================================================================
+// Revisar rascunhos / editar doce
+// ===================================================================
+async function viewReview() {
+  if (!isAdmin()) { location.hash = '#/adicionar'; return; }
+  const drafts = await api.listProducts({ status: 'draft' });
+  $view.innerHTML = `<div class="page">
+    ${pageHead('Revisar antes de publicar', { right: drafts.length ? `<span class="count chip on" style="padding:6px 12px">${drafts.length}</span>` : '' })}
+    ${drafts.length ? `<p class="pad muted small" style="margin:0 0 12px">Os campos com <span class="ai-badge">✨ IA</span> foram sugeridos pela inteligência artificial — confira antes de publicar. Tudo é salvo sozinho.</p>
+      <div class="pad stack" id="editor">${drafts.map((p, i) => editorCard(p, 'draft', i)).join('')}</div>
+      <div class="sticky-bottom"><button class="btn block" id="pub-all">🚀 Publicar todos os prontos</button></div>`
+    : emptyBox('🎉', 'Nada para revisar', 'Todos os doces já estão publicados.', '<a class="btn" href="#/adicionar">Adicionar mais doces</a>')}
+  </div>`;
+  if (!drafts.length) return;
+  const ed = mountEditor(document.getElementById('editor'), drafts, 'draft');
+  document.getElementById('pub-all').onclick = async () => {
+    await ed.flush();
+    const ready = [...ed.model.values()].filter(isComplete);
+    if (!ready.length) { toast('Nenhum doce está completo ainda (título, valor e foto).'); return; }
+    if (!(await confirmSheet(`Publicar ${ready.length} ${ready.length === 1 ? 'doce' : 'doces'}?`, 'Eles aparecem no cardápio na hora. Os incompletos continuam nos rascunhos.', 'Publicar'))) return;
+    let n = 0;
+    for (const p of ready) { try { await api.saveProduct({ id: p.id, status: 'published' }); n++; } catch (err) { fail(err); } }
+    toast(`${n} ${n === 1 ? 'doce publicado' : 'doces publicados'} 🎉`);
+    confetti();
+    render();
+  };
+}
+
+async function viewEdit([id]) {
+  if (!isAdmin()) { location.hash = '#/'; return; }
+  const p = await api.getProduct(id);
+  if (!p) { $view.innerHTML = pageHead('Editar') + emptyBox('🤷', 'Doce não encontrado', ''); return; }
+  $view.innerHTML = `<div class="page">${pageHead('Editar doce')}<div class="pad stack" id="editor">${editorCard(p, p.status === 'draft' ? 'draft' : 'edit', 0)}</div></div>`;
+  mountEditor(document.getElementById('editor'), [p], p.status === 'draft' ? 'draft' : 'edit');
+}
+
+const isComplete = (p) => p.title?.trim() && p.price != null && p.photos?.length;
+
+function editorCard(p, mode, index) {
+  const ai = new Set(p.ai_fields || []);
+  const tag = (f) => (ai.has(f) ? '<em class="ai-badge" data-ai-tag>✨ IA</em>' : '');
+  const cls = (f, missing) => `input${ai.has(f) ? ' ai' : ''}${missing ? ' missing' : ''}`;
+  return `<article class="draft" data-id="${esc(p.id)}">
+    <div class="draft-photos">
+      ${p.photos.map((u, i) => `<div class="draft-photo"><img src="${esc(u)}" alt="">
+        ${i === 0 ? '<span class="first">Capa</span>' : `<button class="mv" data-act="cover" data-i="${i}" title="Usar como capa" aria-label="Usar como capa">★</button>`}
+        <button class="x" data-act="rmphoto" data-i="${i}" aria-label="Tirar foto">✕</button></div>`).join('')}
+      <label class="add-photo">＋<br>Foto<input type="file" accept="image/*" multiple hidden data-act="addphoto"></label>
+    </div>
+    <div class="draft-body">
+      <label class="field"><span>Título ${tag('title')}</span>
+        <input class="${cls('title', !p.title?.trim())}" data-f="title" value="${esc(p.title)}" maxlength="120" placeholder="Ex.: Bolo de cenoura com chocolate"></label>
+      <div class="grid-2">
+        <label class="field"><span>Valor ${tag('price')}</span><div class="money">
+          <input class="${cls('price', p.price == null)}" data-f="price" inputmode="decimal" value="${p.price == null ? '' : Number(p.price).toFixed(2).replace('.', ',')}" placeholder="0,00"></div></label>
+        <label class="field"><span>Categoria ${tag('category')}</span>
+          <select class="${cls('category')}" data-f="category"><option value="">Escolha…</option>
+          ${categories.map((c) => `<option value="${esc(c.slug)}" ${c.slug === p.category ? 'selected' : ''}>${esc(c.emoji)} ${esc(c.name)}</option>`).join('')}</select></label>
+      </div>
+      <label class="field"><span>Descrição ${tag('description')}</span>
+        <textarea class="${cls('description')}" data-f="description" maxlength="2000" rows="3" placeholder="Conte do que é feito, tamanho, rendimento…">${esc(p.description)}</textarea></label>
+      <div class="switch-row" style="padding:0"><div class="grow"><b>⭐ Destaque</b><div class="small muted">Aparece no carrossel do início</div></div>
+        <label class="switch"><input type="checkbox" data-f="featured" ${p.featured ? 'checked' : ''}><i></i></label></div>
+      <div class="small muted" data-status>${mode === 'draft' ? 'Rascunho salvo' : ''}</div>
+    </div>
+    <div class="draft-actions">
+      ${mode === 'draft' ? `
+        <button class="btn sm" data-act="publish">🚀 Publicar</button>
+        ${api.aiAvailable ? '<button class="btn sm soft" data-act="ai">✨ Refazer com IA</button>' : ''}
+        ${index > 0 ? '<button class="btn sm ghost" data-act="merge" title="Junta as fotos deste card no doce de cima">⤴ Juntar ao de cima</button>' : ''}
+        <button class="btn sm danger" data-act="delete">🗑 Excluir</button>`
+      : `
+        <button class="btn sm" data-act="save">💾 Salvar alterações</button>
+        <button class="btn sm ghost" data-act="unpublish">🙈 Despublicar</button>
+        <button class="btn sm danger" data-act="delete">🗑 Excluir</button>`}
+    </div>
+  </article>`;
+}
+
+function mountEditor(root, list, mode) {
+  const model = new Map(list.map((p) => [p.id, { ...p, ai_fields: [...(p.ai_fields || [])], photos: [...p.photos] }]));
+  const timers = new Map();
+  const cardOf = (id) => root.querySelector(`.draft[data-id="${CSS.escape(id)}"]`);
+  const status = (id, t) => { const s = cardOf(id)?.querySelector('[data-status]'); if (s) s.textContent = t; };
+  const payload = (p) => ({ id: p.id, title: p.title, price: p.price, description: p.description, category: p.category || null, featured: p.featured, photos: p.photos, ai_fields: p.ai_fields });
+  const save = async (id) => {
+    clearTimeout(timers.get(id)); timers.delete(id);
+    const p = model.get(id);
+    if (!p) return;
+    status(id, 'Salvando…');
+    try { await api.saveProduct(payload(p)); status(id, 'Salvo ✓'); } catch (err) { status(id, 'Não salvou'); fail(err); }
+  };
+  const schedule = (id) => {
+    if (mode !== 'draft') { status(id, 'Alterações não salvas'); return; }
+    clearTimeout(timers.get(id));
+    timers.set(id, setTimeout(() => save(id), 700));
+    status(id, 'Editando…');
+  };
+  const flush = () => Promise.all([...timers.keys()].map(save));
+  const redrawCard = (id) => {
+    const c = cardOf(id);
+    const i = [...root.children].indexOf(c);
+    c.outerHTML = editorCard(model.get(id), mode, i);
+  };
+  const removeCard = (id) => {
+    const c = cardOf(id);
+    model.delete(id);
+    c.style.transition = 'all .35s'; c.style.opacity = '0'; c.style.transform = 'scale(.95)';
+    setTimeout(() => {
+      c.remove();
+      if (!root.children.length) render();
+      else [...root.children].forEach((el, i) => { if (i === 0) el.querySelector('[data-act="merge"]')?.remove(); });
+    }, 350);
+  };
+
+  root.addEventListener('input', (e) => {
+    const f = e.target.dataset.f;
+    const card = e.target.closest('.draft');
+    if (!f || !card) return;
+    const p = model.get(card.dataset.id);
+    if (f === 'price') p.price = parsePrice(e.target.value);
+    else if (f === 'featured') p.featured = e.target.checked;
+    else p[f] = e.target.value;
+    p.ai_fields = p.ai_fields.filter((x) => x !== f);
+    e.target.classList.remove('ai');
+    e.target.closest('.field')?.querySelector('[data-ai-tag]')?.remove();
+    if (f === 'title') e.target.classList.toggle('missing', !p.title.trim());
+    if (f === 'price') e.target.classList.toggle('missing', p.price == null);
+    schedule(p.id);
+  });
+  root.addEventListener('change', async (e) => {
+    const card = e.target.closest('.draft');
+    if (!card) return;
+    if (e.target.dataset.f === 'category' || e.target.dataset.f === 'featured') e.target.dispatchEvent(new Event('input', { bubbles: true }));
+    if (e.target.dataset.act !== 'addphoto') return;
+    const p = model.get(card.dataset.id);
+    const files = [...e.target.files].slice(0, 10 - p.photos.length);
+    if (!files.length) { toast('Cada doce tem até 10 fotos.'); return; }
+    status(p.id, `Enviando ${files.length} ${files.length === 1 ? 'foto' : 'fotos'}…`);
+    try {
+      for (const f of files) p.photos.push(await api.uploadPhoto(await resizePhoto(f), 'produtos'));
+      redrawCard(p.id);
+      mode === 'draft' ? await save(p.id) : status(p.id, 'Alterações não salvas');
+    } catch (err) { fail(err); }
+  });
+  root.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-act]');
+    const card = e.target.closest('.draft');
+    if (!b || !card || b.tagName === 'INPUT') return;
+    const id = card.dataset.id;
+    const p = model.get(id);
+    const act = b.dataset.act;
+    try {
+      if (act === 'cover' || act === 'rmphoto') {
+        e.preventDefault();
+        const i = Number(b.dataset.i);
+        const [url] = p.photos.splice(i, 1);
+        if (act === 'cover') p.photos.unshift(url);
+        else if (mode === 'draft') api.removePhotos([url]).catch(() => {});
+        redrawCard(id);
+        mode === 'draft' ? await save(id) : status(id, 'Alterações não salvas');
+      } else if (act === 'publish') {
+        await flush();
+        if (!isComplete(p)) { toast('Falta ' + [!p.title?.trim() && 'título', p.price == null && 'valor', !p.photos.length && 'foto'].filter(Boolean).join(', ') + '.'); return; }
+        b.disabled = true;
+        await api.saveProduct({ ...payload(p), status: 'published' });
+        toast('Publicado! Já está no cardápio 🎉');
+        removeCard(id);
+      } else if (act === 'ai') {
+        if (!p.photos.length) { toast('Adicione uma foto primeiro.'); return; }
+        b.disabled = true; b.innerHTML = '<span class="spin"></span> Olhando…';
+        const blob = await (await fetch(p.photos[0])).blob();
+        Object.assign(p, aiPatch(await aiFor(blob)));
+        redrawCard(id);
+        await save(id);
+        toast('Preenchido pela IA ✨ — confira');
+      } else if (act === 'merge') {
+        const prevCard = card.previousElementSibling;
+        const prev = prevCard && model.get(prevCard.dataset.id);
+        if (!prev) return;
+        if (prev.photos.length + p.photos.length > 10) { toast('O doce de cima ficaria com mais de 10 fotos.'); return; }
+        prev.photos.push(...p.photos);
+        await save(prev.id);
+        await api.deleteProduct({ ...p, photos: [] });
+        redrawCard(prev.id);
+        removeCard(id);
+        toast('Fotos juntadas no doce de cima');
+      } else if (act === 'delete') {
+        if (!(await confirmSheet('Excluir este doce?', 'As fotos e os dados dele serão apagados.', 'Excluir', true))) return;
+        clearTimeout(timers.get(id)); timers.delete(id);
+        await api.deleteProduct(p);
+        toast('Doce excluído');
+        if (mode === 'edit') { location.hash = '#/'; return; }
+        removeCard(id);
+      } else if (act === 'save') {
+        if (!isComplete(p)) { toast('Um doce publicado precisa de título, valor e foto.'); return; }
+        await save(id);
+        toast('Alterações salvas ✓');
+        location.hash = `#/doce/${id}`;
+      } else if (act === 'unpublish') {
+        await api.saveProduct({ ...payload(p), status: 'draft' });
+        toast('Voltou para os rascunhos');
+        location.hash = '#/revisar';
+      }
+    } catch (err) {
+      fail(err);
+      b.disabled = false;
+      if (act === 'ai') b.innerHTML = '✨ Refazer com IA';
+    }
+  });
+  cleanups.push(() => flush());
+  return { model, flush };
+}
+
+// ===================================================================
+// Chat
+// ===================================================================
+const isUnread = (c) => {
+  const u = user();
+  if (!u || !c.last_sender || c.last_sender === u.id) return false;
+  const seen = isAdmin() && c.customer_id !== u.id ? c.admin_read_at : c.customer_read_at;
+  return new Date(c.last_message_at) > new Date(seen);
+};
+async function refreshUnread() {
+  if (!user()) { unreadCount = 0; } else {
+    try { unreadCount = (await api.listConversations()).filter(isUnread).length; } catch { /* sem rede */ }
+  }
+  $badge.hidden = !unreadCount;
+  $badge.textContent = unreadCount > 9 ? '9+' : unreadCount;
+  if ('setAppBadge' in navigator) (unreadCount ? navigator.setAppBadge(unreadCount) : navigator.clearAppBadge()).catch?.(() => {});
+}
+
+const convRow = (c) => {
+  const who = isAdmin() && c.customer_id !== user().id ? c.customer?.name || 'Cliente' : settings.app_name;
+  const un = isUnread(c);
+  return `<a class="conv ${un ? 'unread' : ''}" href="#/chat/${esc(c.id)}">
+    <span class="conv-photo"><img src="${esc(c.photo_url)}" alt="" loading="lazy">
+      ${isAdmin() && c.customer_id !== user().id ? (c.customer?.avatar_url ? `<img class="avatar" src="${esc(c.customer.avatar_url)}" alt="" referrerpolicy="no-referrer">` : `<span class="avatar">${initials(who)}</span>`) : ''}</span>
+    <span class="grow"><div class="conv-title">${esc(c.title)}</div><div class="conv-last">${esc(who)}: ${esc(c.last_message || 'Conversa iniciada')}</div></span>
+    <span class="stack" style="gap:6px;justify-items:end"><span class="conv-time">${fmtTime(c.last_message_at)}</span>${un ? '<span class="unread-dot"></span>' : ''}</span></a>`;
+};
+
+async function viewChats() {
+  if (!user()) { $view.innerHTML = loginGate('💬', 'Converse com a gente', 'Toque em "Conversar sobre esta foto" em qualquer doce. Entre com o Google para ver suas conversas.'); return; }
+  const draw = async () => {
+    const list = await api.listConversations();
+    $view.innerHTML = `<div class="page">${pageHead(isAdmin() ? 'Conversas com clientes' : 'Chat', { back: false })}
+      ${list.length ? `<div>${list.map(convRow).join('')}</div>`
+      : emptyBox('💬', 'Nenhuma conversa ainda', 'Cada conversa nasce de uma foto: abra um doce e toque em <b>Conversar sobre esta foto</b>.', '<a class="btn" href="#/">Ver o cardápio</a>')}</div>`;
+  };
+  await draw();
+  const h = () => draw();
+  chatHandlers.add(h);
+  cleanups.push(() => chatHandlers.delete(h));
+}
+
+async function viewChat([id]) {
+  if (!user()) { $view.innerHTML = loginGate('💬', 'Entre para ver a conversa', ''); return; }
+  const c = await api.getConversation(id);
+  if (!c) { $view.innerHTML = pageHead('Chat') + emptyBox('🤷', 'Conversa não encontrada', ''); return; }
+  const me = user().id;
+  const adminView = isAdmin() && c.customer_id !== me;
+  const product = c.product_id ? await api.getProduct(c.product_id) : null;
+  let msgs = await api.listMessages(id);
+
+  $view.innerHTML = `<div class="chat-page">
+    <header class="page-head">
+      <button class="icon-btn" data-back aria-label="Voltar">${I.back}</button>
+      <img src="${esc(c.photo_url)}" alt="" style="width:42px;height:42px;border-radius:12px;object-fit:cover">
+      <div class="grow"><div style="font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.title)}</div>
+        <div class="small muted">${adminView ? esc(c.customer?.name || 'Cliente') : `${esc(settings.app_name)} · responde rapidinho`}</div></div>
+      ${adminView && c.customer?.whatsapp ? `<a class="icon-btn" style="color:#25d366" target="_blank" rel="noopener" href="${esc(waLink(c.customer.whatsapp, `Olá, ${firstName(c.customer.name)}! Aqui é da ${settings.app_name}.`))}" aria-label="WhatsApp do cliente">${I.whats}</a>` : ''}
+    </header>
+    <div class="chat-scroll" id="msgs"></div>
+    ${!adminView ? `<div class="quick" id="quick">${['Ainda tem disponível?', 'Qual o prazo?', 'Faz em outro tamanho?', 'Quero encomendar! 🙌'].map((t) => `<button class="chip">${t}</button>`).join('')}</div>` : ''}
+    <form class="chat-input" id="form">
+      <textarea class="input" id="text" rows="1" maxlength="2000" placeholder="Escreva sua mensagem…" enterkeyhint="send"></textarea>
+      <button class="send-btn" aria-label="Enviar">${I.send}</button>
+    </form>
+  </div>`;
+
+  const $msgs = document.getElementById('msgs');
+  const about = `<div class="chat-about"><img src="${esc(c.photo_url)}" alt="">
+    <div><b>Conversa sobre esta foto</b>${product ? `<br>${esc(product.title)} · <b>${money(product.price)}</b><br><a href="#/doce/${esc(product.id)}" style="color:var(--primary);font-weight:800">Ver doce →</a>` : '<br><span class="muted">Foto de inspiração para encomenda</span>'}</div></div>`;
+  const draw = () => {
+    let lastDay = '';
+    $msgs.innerHTML = about + msgs.map((m) => {
+      const day = fmtDay(m.created_at);
+      const sep = day !== lastDay ? `<div class="day-sep">${day}</div>` : '';
+      lastDay = day;
+      return `${sep}<div class="bubble ${m.sender_id === me ? 'me' : 'them'}">${esc(m.body)}<time>${new Date(m.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></div>`;
+    }).join('') + (msgs.length ? '' : `<p class="center muted small">${adminView ? 'O cliente ainda não escreveu.' : 'Diga oi! A gente responde por aqui e avisa no seu celular. 💕'}</p>`);
+    $msgs.scrollTop = $msgs.scrollHeight;
+    const q = document.getElementById('quick');
+    if (q) q.hidden = msgs.filter((m) => m.sender_id === me).length > 1;
+  };
+  draw();
+  api.markRead(id).then(refreshUnread);
+
+  const $text = document.getElementById('text');
+  const grow = () => { $text.style.height = 'auto'; $text.style.height = Math.min($text.scrollHeight, 120) + 'px'; };
+  $text.addEventListener('input', grow);
+  $text.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && matchMedia('(hover: hover)').matches) { e.preventDefault(); document.getElementById('form').requestSubmit(); }
+  });
+  const send = async (body) => {
+    body = body.trim();
+    if (!body) return;
+    const temp = { id: `tmp-${Date.now()}`, sender_id: me, body, created_at: new Date().toISOString() };
+    msgs.push(temp);
+    draw();
+    try {
+      const saved = await api.sendMessage(id, body);
+      const i = msgs.indexOf(temp);
+      if (msgs.some((m) => m.id === saved.id)) msgs.splice(i, 1); else msgs[i] = saved;
+      draw();
+    } catch (err) {
+      msgs = msgs.filter((m) => m !== temp);
+      draw();
+      $text.value = body;
+      fail(err);
+    }
+  };
+  document.getElementById('form').onsubmit = (e) => {
+    e.preventDefault();
+    const v = $text.value;
+    $text.value = '';
+    grow();
+    send(v);
+    $text.focus();
+  };
+  document.getElementById('quick')?.addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (b) send(b.textContent); });
+
+  const h = (m) => {
+    if (!m || m.conversation_id !== id || msgs.some((x) => x.id === m.id)) return;
+    if (m.sender_id === me && msgs.some((x) => String(x.id).startsWith('tmp-') && x.body === m.body)) return;
+    msgs.push(m);
+    draw();
+    api.markRead(id).then(refreshUnread);
+  };
+  chatHandlers.add(h);
+  cleanups.push(() => chatHandlers.delete(h));
+}
+
+function startRealtime() {
+  stopRealtime?.();
+  stopRealtime = null;
+  if (!user()) return;
+  let t;
+  stopRealtime = api.subscribeChat(
+    (m) => { chatHandlers.forEach((h) => h(m)); clearTimeout(t); t = setTimeout(refreshUnread, 400); },
+    () => { clearTimeout(t); t = setTimeout(refreshUnread, 400); },
+  );
+}
+
+// ===================================================================
+// Menu, perfil, favoritos
+// ===================================================================
+async function viewMenu() {
+  const u = user();
+  const drafts = isAdmin() ? (await api.listProducts({ status: 'draft' })).length : 0;
+  const notif = u ? await pushActive() : false;
+  const theme = (() => { try { return localStorage.getItem('cd-tema') || ''; } catch { return ''; } })();
+  const themeLabel = { '': 'Automático', light: 'Claro', dark: 'Escuro' }[theme];
+  const li = (href, ico, label, right = '<span class="chev">›</span>', attrs = '') =>
+    `<${href ? `a href="${href}"` : 'button'} class="li" ${attrs}><span class="li-ico">${ico}</span><span class="grow">${label}</span>${right}</${href ? 'a' : 'button'}>`;
+
+  $view.innerHTML = `<div class="page">
+    ${pageHead('Menu', { back: false })}
+    <section class="profile-card">
+      ${u ? `<div class="row" style="position:relative;z-index:1">
+        ${u.avatar ? `<img class="avatar lg" src="${esc(u.avatar)}" alt="" referrerpolicy="no-referrer">` : `<span class="avatar lg">${initials(u.name)}</span>`}
+        <div class="grow"><h2>${esc(u.name)}</h2><div style="opacity:.85;font-size:14px;overflow:hidden;text-overflow:ellipsis">${esc(u.email)}</div>
+        ${isAdmin() ? '<span class="chip" style="margin-top:6px;background:rgba(255,255,255,.25);border:0;color:#fff;padding:3px 10px;font-size:12px">👑 Administrador</span>' : ''}</div></div>
+        <a class="btn sm" href="#/perfil" style="margin-top:14px;background:#fff;color:#3b2a2f;position:relative;z-index:1">Editar perfil</a>`
+      : `<div style="position:relative;z-index:1"><div style="font-size:40px">🍰</div><h2>Faça parte da Cozinha Doce</h2>
+        <p style="opacity:.9;margin:6px 0 14px">Entre para favoritar, conversar sobre os doces e receber novidades.</p>${googleBtn()}</div>`}
+    </section>
+
+    ${u ? `<div class="list-title">Minha conta</div><nav class="list">
+      ${li('#/perfil', '👤', 'Meu perfil')}
+      ${li('#/favoritos', '❤️', 'Favoritos', favIds.size ? `<span class="count">${favIds.size}</span>` : '<span class="chev">›</span>')}
+      ${li('#/chat', '💬', 'Mensagens', unreadCount ? `<span class="count">${unreadCount}</span>` : '<span class="chev">›</span>')}
+      <div class="li"><span class="li-ico">🔔</span><span class="grow">Notificações no celular</span><label class="switch"><input type="checkbox" id="notif" ${notif ? 'checked' : ''}><i></i></label></div>
+    </nav>` : ''}
+
+    ${isAdmin() ? `<div class="list-title">Administração</div><nav class="list">
+      ${li('#/admin/aparencia', '🎨', 'Aparência: cor e ícone')}
+      ${li('#/admin/categorias', '🏷️', 'Categorias')}
+      ${li('#/revisar', '📝', 'Rascunhos', drafts ? `<span class="count">${drafts}</span>` : '<span class="chev">›</span>')}
+      ${li('#/admin/novidades', '📧', 'Quem quer novidades por e-mail')}
+    </nav>` : ''}
+
+    <div class="list-title">App</div><nav class="list">
+      ${!isStandalone() ? li('', '📲', 'Instalar o app no celular', '<span class="chev">›</span>', 'id="install"') : ''}
+      ${li('', '🌗', 'Tema', `<span class="muted small">${themeLabel}</span>`, 'id="theme"')}
+      ${li('privacidade.html', '🔒', 'Política de privacidade')}
+      ${li('termos.html', '📄', 'Termos de uso')}
+      ${u ? li('', '🚪', 'Sair da conta', '', 'id="logout"') : ''}
+    </nav>
+    <p class="center small muted" style="margin:22px 0 0">${esc(settings.app_name)} · feito com 💕</p>
+  </div>`;
+
+  document.getElementById('notif')?.addEventListener('change', (e) => togglePush(e.target));
+  document.getElementById('theme').onclick = () => {
+    const next = { '': 'light', light: 'dark', dark: '' }[theme];
+    try { next ? localStorage.setItem('cd-tema', next) : localStorage.removeItem('cd-tema'); } catch {}
+    applyTheme();
+    render();
+  };
+  document.getElementById('install')?.addEventListener('click', showInstall);
+  document.getElementById('logout')?.addEventListener('click', async () => {
+    if (!(await confirmSheet('Sair da conta?', 'Você continua vendo o cardápio, mas sem favoritos e conversas.', 'Sair'))) return;
+    await disablePush(api).catch(() => {});
+    await api.signOut();
+    toast('Até logo! 👋');
+  });
+}
+
+async function togglePush(input) {
+  if (input.checked) {
+    const r = await enablePush(api).catch((err) => { fail(err); return 'erro'; });
+    if (r === 'ativo') { toast('Pronto! Você vai receber os avisos no celular 🔔'); return true; }
+    input.checked = false;
+    if (r === 'ios-instalar') sheet(`<h2>📲 Instale o app primeiro</h2><p class="muted">No iPhone, as notificações só funcionam com o app na tela de início:</p>
+      <ol><li>Toque em <b>Compartilhar</b> (o quadrado com a seta) no Safari;</li><li>Escolha <b>Adicionar à Tela de Início</b>;</li><li>Abra o app pelo ícone e ative de novo.</li></ol>
+      <button class="btn block" data-close>Entendi</button>`);
+    else if (r === 'negado') toast('As notificações estão bloqueadas. Libere nas configurações do navegador.', 4500);
+    else if (r === 'sem-chave') toast('As notificações ainda não foram configuradas pelo administrador.', 4000);
+    else if (r === 'sem-suporte') toast('Este navegador não recebe notificações.', 4000);
+    return false;
+  }
+  await disablePush(api).catch(fail);
+  toast('Notificações desligadas neste aparelho');
+  return false;
+}
+
+function showInstall() {
+  if (installPrompt) { installPrompt.prompt(); installPrompt.userChoice.finally(() => (installPrompt = null)); return; }
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  sheet(`<div class="center"><img src="${esc(appIcon(true))}" alt="" class="icon-preview" style="margin:0 auto 12px"></div>
+    <h2 class="center">Leve a ${esc(settings.app_name)} no bolso</h2>
+    ${ios ? '<ol><li>Toque em <b>Compartilhar</b> (quadrado com seta) no Safari;</li><li>Escolha <b>Adicionar à Tela de Início</b>;</li><li>Toque em <b>Adicionar</b>.</li></ol>'
+      : '<ol><li>Abra o menu do navegador (⋮);</li><li>Toque em <b>Instalar app</b> ou <b>Adicionar à tela inicial</b>.</li></ol>'}
+    <button class="btn block" data-close>Entendi</button>`);
+}
+
+async function viewProfile() {
+  if (!user()) { $view.innerHTML = loginGate('👤', 'Seu perfil', 'Entre com o Google para salvar seus dados e receber mensagens.'); return; }
+  const [p, convs, notif] = await Promise.all([api.getProfile(), api.listConversations(), pushActive()]);
+  const chosen = new Set(p.categories || []);
+  const u = user();
+  $view.innerHTML = `<div class="page">
+    ${pageHead('Meu perfil')}
+    <div class="pad stack">
+      <div class="card row">
+        ${u.avatar ? `<img class="avatar lg" src="${esc(u.avatar)}" alt="" referrerpolicy="no-referrer">` : `<span class="avatar lg">${initials(p.name)}</span>`}
+        <div class="grow"><b style="font-size:18px">${esc(p.name || u.name)}</b><div class="small muted">${esc(p.email || u.email)}</div><div class="small muted">Conta Google</div></div>
+      </div>
+
+      <div class="card stack">
+        <div class="row between"><h2 style="font-size:19px">💬 Mensagens</h2><a href="#/chat" class="small" style="color:var(--primary);font-weight:800">Ver todas</a></div>
+        ${convs.length ? `<div style="margin:0 -18px">${convs.slice(0, 3).map(convRow).join('')}</div>` : '<p class="muted small" style="margin:0">Quando a gente responder, as mensagens aparecem aqui e no seu celular.</p>'}
+      </div>
+
+      <form class="card stack" id="pf">
+        <label class="field"><span>Nome</span><input class="input" name="name" value="${esc(p.name || '')}" maxlength="80" autocomplete="name"></label>
+        <label class="field"><span>WhatsApp</span><input class="input" name="whatsapp" inputmode="tel" value="${esc(fmtPhone(p.whatsapp))}" placeholder="(61) 99999-9999" autocomplete="tel"></label>
+        <label class="field"><span>Região onde mora</span><input class="input" name="region" value="${esc(p.region || '')}" maxlength="80" placeholder="Ex.: Asa Norte, Brasília" autocomplete="address-level2"></label>
+        <div class="field"><span>Doces que você mais gosta</span>
+          <div class="chips wrap" id="pcats">${categories.map((c) => `<button type="button" class="chip ${chosen.has(c.slug) ? 'on' : ''}" data-c="${esc(c.slug)}">${esc(c.emoji)} ${esc(c.name)}</button>`).join('')}</div>
+          <span class="small muted" style="font-weight:400">Usamos para avisar quando sair novidade do que você gosta.</span></div>
+        <div>
+          <div class="switch-row"><div class="grow"><b>📧 Novidades por e-mail</b><div class="small muted">Lançamentos e promoções, sem exagero.</div></div>
+            <label class="switch"><input type="checkbox" name="email_news" ${p.email_news ? 'checked' : ''}><i></i></label></div>
+          <div class="switch-row"><div class="grow"><b>🔔 Notificações no celular</b><div class="small muted">Respostas do chat neste aparelho.</div></div>
+            <label class="switch"><input type="checkbox" id="pnotif" ${notif ? 'checked' : ''}><i></i></label></div>
+          <div class="switch-row"><div class="grow"><b>🍰 Avisar doce novo</b><div class="small muted">Notificação quando sair doce das suas categorias.</div></div>
+            <label class="switch"><input type="checkbox" name="push_news" ${p.push_news ? 'checked' : ''}><i></i></label></div>
+        </div>
+        <button class="btn block">Salvar perfil</button>
+      </form>
+      <button class="btn danger block" id="del">Excluir minha conta</button>
+    </div>
+  </div>`;
+
+  document.getElementById('pcats').onclick = (e) => {
+    const b = e.target.closest('[data-c]');
+    if (!b) return;
+    chosen.has(b.dataset.c) ? chosen.delete(b.dataset.c) : chosen.add(b.dataset.c);
+    b.classList.toggle('on');
+  };
+  const form = document.getElementById('pf');
+  form.whatsapp.addEventListener('input', (e) => { e.target.value = fmtPhone(e.target.value.replace(/\D/g, '').slice(0, 11)); });
+  document.getElementById('pnotif').onchange = (e) => togglePush(e.target);
+  form.push_news.addEventListener('change', async (e) => {
+    if (e.target.checked && !(await pushActive())) {
+      const n = document.getElementById('pnotif');
+      n.checked = true;
+      if (!(await togglePush(n))) e.target.checked = false;
+    }
+  });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const wa = form.whatsapp.value.replace(/\D/g, '');
+    if (wa && (wa.length < 10 || wa.length > 11)) { toast('Confira o WhatsApp com DDD.'); return; }
+    try {
+      await api.saveProfile({ name: form.name.value.trim() || null, whatsapp: wa || null, region: form.region.value.trim() || null, categories: [...chosen], email_news: form.email_news.checked, push_news: form.push_news.checked });
+      toast('Perfil salvo ✓');
+    } catch (err) { fail(err); }
+  };
+  document.getElementById('del').onclick = async () => {
+    if (!(await confirmSheet('Excluir sua conta?', 'Apagamos seu perfil, favoritos e conversas. Isso não tem volta.', 'Excluir para sempre', true))) return;
+    try { await disablePush(api).catch(() => {}); await api.deleteAccount(); toast('Conta excluída. Sentiremos sua falta 💔'); location.hash = '#/'; } catch (err) { fail(err); }
+  };
+}
+
+async function viewFavorites() {
+  if (!user()) { $view.innerHTML = loginGate('❤️', 'Seus favoritos', 'Entre com o Google para guardar os doces que você amou.'); return; }
+  const list = await api.listProducts({ ids: [...favIds] });
+  $view.innerHTML = `<div class="page">${pageHead('Favoritos')}
+    ${list.length ? `<div class="grid">${list.map(productCard).join('')}</div>`
+    : emptyBox('💝', 'Nenhum favorito ainda', 'Toque no coração dos doces que você amar para guardar aqui.', '<a class="btn" href="#/">Explorar doces</a>')}</div>`;
+}
+
+// ===================================================================
+// Administração
+// ===================================================================
+const PRESETS = [
+  ['Morango', '#e5568a'], ['Framboesa', '#c2185b'], ['Chocolate', '#7b4a2e'], ['Caramelo', '#d9822b'],
+  ['Pistache', '#5a9b4c'], ['Menta', '#2a9d8f'], ['Lavanda', '#8a6fd1'], ['Mirtilo', '#4a6fd8'],
+];
+async function viewAppearance() {
+  if (!isAdmin()) { location.hash = '#/menu'; return; }
+  const s = { ...settings };
+  let iconFile = null;
+  let resetIcon = false;
+  $view.innerHTML = `<div class="page">${pageHead('Aparência')}
+    <div class="pad stack">
+      <div class="card stack">
+        <h2 style="font-size:19px">🎨 Cor do app</h2>
+        <div class="swatches" id="sw">${PRESETS.map(([n, c]) => `<button class="swatch ${c === s.primary_color ? 'on' : ''}" style="background:${c}" data-c="${c}" title="${n}" aria-label="${n}"></button>`).join('')}
+          <label class="swatch custom ${PRESETS.some(([, c]) => c === s.primary_color) ? '' : 'on'}" title="Outra cor"><input type="color" id="custom" value="${esc(s.primary_color)}"></label></div>
+        <div class="preview-phone">
+          <div class="row"><img class="brand-logo" id="pv-icon" src="${esc(appIcon(false))}" alt=""><div><div class="brand-name" id="pv-name">${esc(s.app_name)}</div><div class="brand-tag" id="pv-tag">${esc(s.tagline)}</div></div></div>
+          <div class="row"><span class="btn sm">Botão</span><span class="chip on">Chip</span><span class="pcard-price">R$ 42,00</span></div>
+        </div>
+      </div>
+
+      <div class="card stack">
+        <h2 style="font-size:19px">🧁 Ícone do app</h2>
+        <div class="row"><img class="icon-preview" id="icon-prev" src="${esc(appIcon(true))}" alt="">
+          <div class="stack grow" style="gap:8px"><label class="btn sm soft">Trocar ícone<input type="file" id="icon" accept="image/*" hidden></label>
+          <button class="btn sm ghost" id="icon-reset" ${s.icon_url ? '' : 'hidden'}>Usar o ícone padrão</button></div></div>
+        <p class="small muted" style="margin:0">Use uma imagem quadrada (o centro é recortado). Quem instalar o app depois da troca já recebe o ícone novo; quem já instalou pode precisar reinstalar.</p>
+      </div>
+
+      <form class="card stack" id="af">
+        <label class="field"><span>Nome do app</span><input class="input" name="app_name" value="${esc(s.app_name)}" maxlength="40" required></label>
+        <label class="field"><span>Frase</span><input class="input" name="tagline" value="${esc(s.tagline)}" maxlength="80"></label>
+        <label class="field"><span>WhatsApp da loja <span class="small muted" style="font-weight:400">(opcional, mostra "Pedir pelo WhatsApp")</span></span>
+          <input class="input" name="whatsapp" inputmode="tel" value="${esc(fmtPhone(s.whatsapp))}" placeholder="(61) 99999-9999"></label>
+        <button class="btn block" id="save">Salvar aparência</button>
+      </form>
+    </div></div>`;
+
+  const setColor = (c) => {
+    s.primary_color = c;
+    document.documentElement.style.setProperty('--primary', c);
+    document.querySelectorAll('#sw .swatch').forEach((x) => x.classList.toggle('on', x.dataset.c === c || (x.classList.contains('custom') && !PRESETS.some(([, p]) => p === c))));
+  };
+  document.getElementById('sw').onclick = (e) => { const b = e.target.closest('[data-c]'); if (b) setColor(b.dataset.c); };
+  document.getElementById('custom').oninput = (e) => setColor(e.target.value);
+  const form = document.getElementById('af');
+  form.app_name.oninput = (e) => (document.getElementById('pv-name').textContent = e.target.value);
+  form.tagline.oninput = (e) => (document.getElementById('pv-tag').textContent = e.target.value);
+  form.whatsapp.oninput = (e) => { e.target.value = fmtPhone(e.target.value.replace(/\D/g, '').slice(0, 11)); };
+  document.getElementById('icon').onchange = (e) => {
+    iconFile = e.target.files[0];
+    if (!iconFile) return;
+    resetIcon = false;
+    const url = URL.createObjectURL(iconFile);
+    document.getElementById('icon-prev').src = url;
+    document.getElementById('pv-icon').src = url;
+  };
+  document.getElementById('icon-reset').onclick = () => {
+    iconFile = null;
+    resetIcon = true;
+    document.getElementById('icon-prev').src = 'icons/icon-512.png';
+    document.getElementById('pv-icon').src = 'icons/icon-192.png';
+  };
+  cleanups.push(() => document.documentElement.style.setProperty('--primary', settings.primary_color));
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('save');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Salvando…';
+    try {
+      const wa = form.whatsapp.value.replace(/\D/g, '');
+      const patch = { primary_color: s.primary_color, app_name: form.app_name.value.trim() || 'Cozinha Doce', tagline: form.tagline.value.trim(), whatsapp: wa || null };
+      if (iconFile) {
+        patch.icon_url = await api.uploadPhoto(await squareIcon(iconFile, 512), 'app');
+        patch.icon_192_url = await api.uploadPhoto(await squareIcon(iconFile, 192), 'app');
+      } else if (resetIcon) {
+        patch.icon_url = null;
+        patch.icon_192_url = null;
+      }
+      applySettings({ ...settings, ...(await api.saveSettings(patch)) });
+      toast('Aparência salva ✨');
+      render();
+    } catch (err) {
+      fail(err);
+      btn.disabled = false;
+      btn.textContent = 'Salvar aparência';
+    }
+  };
+}
+
+async function viewCategories() {
+  if (!isAdmin()) { location.hash = '#/menu'; return; }
+  categories = await api.listCategories();
+  $view.innerHTML = `<div class="page">${pageHead('Categorias')}
+    <div class="pad stack">
+      <div class="list" style="margin:0" id="cl">${categories.map((c, i) => `
+        <div class="li" data-slug="${esc(c.slug)}">
+          <input class="input" data-k="emoji" value="${esc(c.emoji)}" style="width:56px;text-align:center;padding:8px" maxlength="4" aria-label="Emoji">
+          <input class="input grow" data-k="name" value="${esc(c.name)}" maxlength="40" aria-label="Nome">
+          <button class="icon-btn" data-mv="-1" ${i ? '' : 'disabled'} aria-label="Subir">↑</button>
+          <button class="icon-btn" data-del aria-label="Excluir" style="color:var(--danger)">✕</button>
+        </div>`).join('')}</div>
+      <form class="card row" id="nc">
+        <input class="input" name="emoji" placeholder="🍰" style="width:64px;text-align:center" maxlength="4">
+        <input class="input grow" name="name" placeholder="Nova categoria" maxlength="40" required>
+        <button class="btn sm">Adicionar</button>
+      </form>
+      <p class="small muted">Os doces de uma categoria excluída ficam sem categoria (continuam publicados).</p>
+    </div></div>`;
+  const list = document.getElementById('cl');
+  list.addEventListener('change', async (e) => {
+    const row = e.target.closest('[data-slug]');
+    const k = e.target.dataset.k;
+    if (!row || !k) return;
+    const c = categories.find((x) => x.slug === row.dataset.slug);
+    c[k] = e.target.value.trim() || c[k];
+    try { await api.saveCategory(c); toast('Categoria salva ✓'); } catch (err) { fail(err); }
+  });
+  list.addEventListener('click', async (e) => {
+    const row = e.target.closest('[data-slug]');
+    if (!row) return;
+    const i = categories.findIndex((x) => x.slug === row.dataset.slug);
+    try {
+      if (e.target.closest('[data-mv]') && i > 0) {
+        [categories[i - 1], categories[i]] = [categories[i], categories[i - 1]];
+        await Promise.all(categories.map((c, pos) => ((c.position = pos), api.saveCategory(c))));
+        viewCategories();
+      } else if (e.target.closest('[data-del]')) {
+        if (!(await confirmSheet(`Excluir "${categories[i].name}"?`, 'Os doces dela ficam sem categoria.', 'Excluir', true))) return;
+        await api.deleteCategory(categories[i].slug);
+        viewCategories();
+      }
+    } catch (err) { fail(err); }
+  });
+  document.getElementById('nc').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    let slug = slugify(f.name.value) || 'categoria';
+    while (categories.some((c) => c.slug === slug)) slug = (slug + '_2').slice(-30);
+    try {
+      await api.saveCategory({ slug, name: f.name.value.trim(), emoji: f.emoji.value.trim() || '🍬', position: categories.length });
+      toast('Categoria criada ✓');
+      viewCategories();
+    } catch (err) { fail(err); }
+  };
+}
+
+async function viewNewsletter() {
+  if (!isAdmin()) { location.hash = '#/menu'; return; }
+  const list = await api.newsletterList();
+  $view.innerHTML = `<div class="page">${pageHead('Novidades por e-mail')}
+    <div class="pad stack">
+      <div class="card row between"><div><b style="font-size:26px;font-family:var(--font-display)">${list.length}</b><div class="small muted">${list.length === 1 ? 'pessoa aceitou' : 'pessoas aceitaram'} receber novidades</div></div>
+        <div class="stack" style="gap:8px"><button class="btn sm" id="copy" ${list.length ? '' : 'disabled'}>Copiar e-mails</button><button class="btn sm ghost" id="csv" ${list.length ? '' : 'disabled'}>Baixar planilha</button></div></div>
+      <p class="small muted" style="margin:0">Cole os e-mails no campo "Cco" (cópia oculta) ou importe a planilha no seu serviço de e-mail marketing. Respeite quem pedir para sair.</p>
+      ${list.length ? `<div class="list" style="margin:0">${list.map((p) => `<div class="li" style="font-weight:600"><span class="li-ico">📧</span><span class="grow"><b>${esc(p.name || '—')}</b><div class="small muted">${esc(p.email)}${p.region ? ' · ' + esc(p.region) : ''}</div>
+        <div class="small muted">${(p.categories || []).map((s) => catOf(s)?.emoji || '').join(' ')}</div></span></div>`).join('')}</div>` : emptyBox('📭', 'Ninguém ainda', 'Quem marcar "Novidades por e-mail" no perfil aparece aqui.')}
+    </div></div>`;
+  document.getElementById('copy').onclick = async () => { await navigator.clipboard.writeText(list.map((p) => p.email).join(', ')); toast('E-mails copiados ✓'); };
+  document.getElementById('csv').onclick = () => {
+    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const rows = [['Nome', 'E-mail', 'Região', 'Categorias'], ...list.map((p) => [p.name, p.email, p.region, (p.categories || []).map((s) => catOf(s)?.name || s).join(', ')])];
+    const blob = new Blob(['﻿' + rows.map((r) => r.map(q).join(';')).join('\n')], { type: 'text/csv' });
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'novidades-cozinha-doce.csv' });
+    a.click();
+  };
+}
+
+// ===================================================================
+// Confete (publicou!)
+// ===================================================================
+function confetti() {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const c = document.createElement('canvas');
+  Object.assign(c.style, { position: 'fixed', inset: '0', pointerEvents: 'none', zIndex: 70 });
+  c.width = innerWidth; c.height = innerHeight;
+  document.body.append(c);
+  const ctx = c.getContext('2d');
+  const colors = [settings.primary_color, '#f6b04a', '#ffd6e4', '#8b6cff', '#3fb79a'];
+  const bits = Array.from({ length: 90 }, () => ({ x: innerWidth / 2, y: innerHeight * 0.6, vx: (Math.random() - 0.5) * 12, vy: -Math.random() * 14 - 6, r: Math.random() * 6 + 3, c: colors[(Math.random() * colors.length) | 0], a: Math.random() * 6 }));
+  let f = 0;
+  (function tick() {
+    ctx.clearRect(0, 0, c.width, c.height);
+    bits.forEach((b) => { b.x += b.vx; b.y += b.vy; b.vy += 0.42; b.a += 0.2; ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(b.a); ctx.fillStyle = b.c; ctx.fillRect(-b.r / 2, -b.r / 4, b.r, b.r / 2); ctx.restore(); });
+    if (++f < 110) requestAnimationFrame(tick); else c.remove();
+  })();
+}
+
+// ===================================================================
+// Rotas
+// ===================================================================
+const ROUTES = [
+  [/^\/$/, viewHome, 'inicio'],
+  [/^\/buscar$/, viewSearch, 'buscar'],
+  [/^\/adicionar$/, viewAdd, 'adicionar'],
+  [/^\/revisar$/, viewReview, 'adicionar'],
+  [/^\/editar\/([^/]+)$/, viewEdit, 'adicionar'],
+  [/^\/doce\/([^/]+)$/, viewProduct, ''],
+  [/^\/chat$/, viewChats, 'chat'],
+  [/^\/chat\/([^/]+)$/, viewChat, 'chat', true],
+  [/^\/menu$/, viewMenu, 'menu'],
+  [/^\/perfil$/, viewProfile, 'menu'],
+  [/^\/favoritos$/, viewFavorites, 'menu'],
+  [/^\/admin\/aparencia$/, viewAppearance, 'menu'],
+  [/^\/admin\/categorias$/, viewCategories, 'menu'],
+  [/^\/admin\/novidades$/, viewNewsletter, 'menu'],
+];
+let renderSeq = 0;
+async function render() {
+  const my = ++renderSeq;
+  cleanups.forEach((fn) => { try { fn(); } catch {} });
+  cleanups = [];
+  document.querySelectorAll('.sheet-backdrop').forEach((b) => b.remove());
+  const raw = location.hash.replace(/^#/, '') || '/';
+  const [path, qs] = raw.split('?');
+  const query = new URLSearchParams(qs || '');
+  const route = ROUTES.find(([re]) => re.test(path)) || ROUTES[0];
+  const params = path.match(route[0])?.slice(1).map(decodeURIComponent) || [];
+  document.body.classList.toggle('no-tabbar', !!route[3]);
+  $tabbar.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === route[2]));
+  window.scrollTo(0, 0);
+  try {
+    await route[1](params, query);
+  } catch (err) {
+    if (my !== renderSeq) return;
+    console.error(err);
+    $view.innerHTML = emptyBox('😵', 'Não deu para carregar', esc(err.message || 'Confira sua internet e tente de novo.'), '<button class="btn" onclick="location.reload()">Tentar de novo</button>');
+  }
+}
+window.addEventListener('hashchange', () => { sessionStorage.setItem('cd-nav', '1'); render(); });
+
+// ===================================================================
+// Início do app
+// ===================================================================
+async function loadUserData() {
+  favIds = new Set(user() ? await api.listFavoriteIds().catch(() => []) : []);
+  startRealtime();
+  refreshUnread();
+  if (user()) syncPush(api);
+}
+
+async function boot() {
+  applyTheme();
+  api = await createApi();
+  await api.init();
+  // Volta do login do Google: tira o ?code= do endereço.
+  if (location.search) history.replaceState(null, '', location.pathname + location.hash);
+  const [s, cats] = await Promise.all([api.getSettings(), api.listCategories()]);
+  applySettings(s);
+  categories = cats;
+  await loadUserData();
+  api.onAuth(async (u) => {
+    await loadUserData();
+    if (u) toast(`Bem-vindo(a), ${firstName(u.name)}! 🍰`);
+    render();
+  });
+  render();
+}
+
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; });
+navigator.serviceWorker?.addEventListener('message', (e) => { if (e.data?.type === 'push') refreshUnread(); });
+if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+document.addEventListener('visibilitychange', () => { if (!document.hidden && api) refreshUnread(); });
+
+boot().catch((err) => {
+  console.error(err);
+  $view.innerHTML = emptyBox('😵', 'O app não abriu', esc(err.message), '<button class="btn" onclick="location.reload()">Tentar de novo</button>');
+});

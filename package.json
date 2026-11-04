@@ -1,0 +1,12 @@
+{
+  "name": "cozinha-doce",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "serve": "npx --yes serve -l 8000 .",
+    "icons": "node scripts/build-icons.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.48.2"
+  }
+}
