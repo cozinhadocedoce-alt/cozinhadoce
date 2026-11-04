@@ -1,7 +1,8 @@
 // Cozinha Doce — telas, rotas e interações.
 import { createApi, configured } from './api.js';
 import { resizePhoto, squareIcon, blobToBase64 } from './image.js';
-import { pushSupport, pushActive, enablePush, disablePush, syncPush, isStandalone } from './push.js';
+import { pushActive, enablePush, disablePush, syncPush, isStandalone } from './push.js';
+import { iconDataUrl, iconPng } from './icone.js';
 
 // ===== Sem zoom (pinça e toque duplo) =====
 ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
@@ -19,6 +20,7 @@ let stopRealtime = null;
 let cleanups = [];
 const chatHandlers = new Set();
 let installPrompt = null;
+let currentCtx = { alive: () => false, touched: false };
 
 // ===================================================================
 // Utilidades
@@ -31,6 +33,7 @@ const initials = (n) => (String(n || '?').trim()[0] || '?').toUpperCase();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const user = () => api.user;
 const isAdmin = () => api.isAdmin;
+const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const parsePrice = (s) => {
   const t = String(s ?? '').replace(/[^\d,.]/g, '');
   if (!t) return null;
@@ -39,8 +42,7 @@ const parsePrice = (s) => {
 };
 const fmtTime = (iso) => {
   const d = new Date(iso);
-  const now = new Date();
-  const days = Math.floor((new Date(now.toDateString()) - new Date(d.toDateString())) / 864e5);
+  const days = Math.floor((new Date(new Date().toDateString()) - new Date(d.toDateString())) / 864e5);
   if (days === 0) return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   if (days === 1) return 'ontem';
   if (days < 7) return d.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '');
@@ -86,7 +88,114 @@ function toast(msg, ms = 2600) {
 }
 const fail = (err) => { console.error(err); toast(err?.message || 'Algo deu errado. Tente de novo.', 4000); };
 
-// Folha que sobe de baixo. Devolve { el, close }.
+// ===================================================================
+// Telas instantâneas (skill tela-instantanea): cada tela desenha na hora com o que ficou guardado
+// da última vez e só redesenha se o banco trouxer algo diferente. O guardado vale só para este
+// aparelho e esta conta, e é apagado ao sair. As permissões continuam nas regras do banco.
+// ===================================================================
+const SCREEN_PREFIX = 'cd-tela:';
+const screenMem = new Map();
+const screenLoading = new Map();
+// Conversas (o administrador vê as de todos os clientes) e a lista de e-mails: só na memória.
+const PRIVATE_SCREENS = /^(chat$|conversa:|novidades$)/;
+// Iguais para todo mundo (cardápio, aparência, categorias): valem com ou sem conta.
+const PUBLIC_SCREENS = /^(inicio$|ajustes$|cats$)/;
+const screenKey = (name) => `${SCREEN_PREFIX}${PUBLIC_SCREENS.test(name) ? 'pub' : user()?.id || 'anon'}:${name}`;
+
+function screenCached(name) {
+  const key = screenKey(name);
+  if (screenMem.has(key)) return screenMem.get(key);
+  if (PRIVATE_SCREENS.test(name)) return null;
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || 'null');
+    if (saved) screenMem.set(key, saved);
+    return saved;
+  } catch {
+    return null;
+  }
+}
+function screenUpdate(name, data) {
+  const key = screenKey(name);
+  screenMem.set(key, data);
+  if (PRIVATE_SCREENS.test(name)) return;
+  try { localStorage.setItem(key, JSON.stringify(data)); } catch {}
+}
+function screenForget(name) {
+  const key = screenKey(name);
+  screenMem.delete(key);
+  screenLoading.delete(key);
+  try { localStorage.removeItem(key); } catch {}
+}
+// Uma busca por vez para cada tela; o resultado fica guardado.
+function screenFetch(name, fetcher) {
+  const key = screenKey(name);
+  if (!screenLoading.has(key)) {
+    const p = fetcher()
+      .then((data) => { screenUpdate(name, data); return data; })
+      .finally(() => screenLoading.delete(key));
+    screenLoading.set(key, p);
+  }
+  return screenLoading.get(key);
+}
+// Desenha na hora com o guardado e de novo se o banco trouxer algo diferente. Sem internet, fica
+// com o guardado. `guard`: em formulários, não troca nada depois que a pessoa começou a mexer.
+async function screenShow(ctx, name, fetcher, draw, { guard = false } = {}) {
+  const cached = screenCached(name);
+  const opened = JSON.stringify(cached);
+  if (cached) draw(cached);
+  let data;
+  try {
+    data = await screenFetch(name, fetcher);
+  } catch (err) {
+    if (cached) return;
+    throw err;
+  }
+  if (!ctx.alive() || JSON.stringify(data) === opened) return;
+  if (cached && (guard && ctx.touched)) return;
+  const typing = document.activeElement;
+  if (cached && $view.contains(typing) && /^(INPUT|TEXTAREA|SELECT)$/.test(typing.tagName)) return;
+  draw(data);
+}
+// Apaga o guardado desta conta (ao sair).
+function screenForgetUser(id) {
+  for (const k of [...screenMem.keys()]) if (k.startsWith(`${SCREEN_PREFIX}${id}:`)) screenMem.delete(k);
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(`${SCREEN_PREFIX}${id}:`)) localStorage.removeItem(k);
+    }
+  } catch {}
+}
+
+// Quem busca o quê
+const loadHome = () => api.listProducts({ limit: 300 });
+const loadDrafts = () => api.listProducts({ status: 'draft' });
+const loadChats = () => api.listConversations();
+const homeCached = () => screenCached('inicio') || [];
+// Doce conhecido de alguma lista guardada (para a página do doce abrir na hora).
+const knownProduct = (id) => homeCached().find((p) => p.id === id) || (screenCached('rascunhos') || []).find((p) => p.id === id) || screenCached(`doce:${id}`);
+
+// Depois de criar, editar, publicar ou apagar doces: confere as listas com o banco em segundo plano.
+function refreshProducts(changedId) {
+  if (changedId) screenForget(`doce:${changedId}`);
+  screenFetch('inicio', loadHome).catch(() => {});
+  if (isAdmin()) screenFetch('rascunhos', loadDrafts).catch(() => {});
+}
+
+// No Início, já busca em segundo plano as telas mais usadas.
+function prefetchScreens() {
+  const run = () => {
+    if (!user()) return;
+    screenFetch('chat', loadChats).catch(() => {});
+    screenFetch('perfil', () => api.getProfile()).catch(() => {});
+    if (isAdmin()) screenFetch('rascunhos', loadDrafts).catch(() => {});
+  };
+  ('requestIdleCallback' in window) ? requestIdleCallback(run, { timeout: 2000 }) : setTimeout(run, 800);
+}
+
+// ===================================================================
+// Folhas, login
+// ===================================================================
 function sheet(html) {
   const root = document.getElementById('sheet-root');
   const back = document.createElement('div');
@@ -107,7 +216,6 @@ function confirmSheet(title, text, okLabel = 'Confirmar', danger = false) {
   });
 }
 const googleBtn = (label = 'Entrar com o Google') => `<button class="btn btn-google block" data-login>${I.google} ${esc(label)}</button>`;
-// Pede login quando a ação precisa de conta. Devolve true se já estiver logado.
 function needLogin(reason) {
   if (user()) return true;
   sheet(`<div class="center" style="font-size:52px">🍰</div><h2 class="center">Entre para continuar</h2>
@@ -120,20 +228,21 @@ const loginGate = (emoji, title, text) => `<section class="page empty" style="pa
 const pageHead = (title, { back = true, right = '' } = {}) => `<header class="page-head">
   ${back ? `<button class="icon-btn" data-back aria-label="Voltar">${I.back}</button>` : ''}<h1>${esc(title)}</h1>${right}</header>`;
 const emptyBox = (emoji, title, text, extra = '') => `<div class="empty"><div class="e">${emoji}</div><h2>${esc(title)}</h2><p class="muted">${text}</p>${extra}</div>`;
+const skeletonGrid = (n = 4) => `<div class="grid">${'<div class="skeleton" style="height:220px"></div>'.repeat(n)}</div>`;
 
 // ===================================================================
 // Aparência
 // ===================================================================
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 function applySettings(s) {
   settings = s;
-  const root = document.documentElement;
-  root.style.setProperty('--primary', s.primary_color);
+  document.documentElement.style.setProperty('--primary', s.primary_color);
   try { localStorage.setItem('cd-cor', s.primary_color); } catch {}
   document.querySelector('meta[name="theme-color"]').content = s.primary_color;
   document.title = `${s.app_name} — ${s.tagline}`;
   document.querySelector('meta[name="apple-mobile-web-app-title"]').content = s.app_name;
   document.getElementById('favicon-link').href = appIcon(false);
-  document.getElementById('apple-icon-link').href = s.icon_url || 'icons/apple-touch-icon.png';
+  document.getElementById('apple-icon-link').href = s.icon_url || 'icons/apple-touch-icon.png?v=2';
   const m = api.manifestUrl();
   if (m) document.getElementById('manifest-link').href = m;
 }
@@ -157,10 +266,14 @@ const wideCard = (p) => `<a class="wide-card" href="#/doce/${esc(p.id)}"><img lo
   <div class="grow"><div class="pcard-title">${esc(p.title)}</div><div class="pcard-price">${money(p.price)}</div>
   <div class="small muted" style="margin-top:2px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden">${esc(p.description)}</div></div></a>`;
 
+function paintHearts() {
+  document.querySelectorAll('[data-fav]').forEach((b) => b.classList.toggle('on', favIds.has(b.dataset.fav)));
+}
 async function toggleFav(id) {
   if (!needLogin('Assim seus doces favoritos ficam guardados na sua conta.')) return;
   const on = !favIds.has(id);
   on ? favIds.add(id) : favIds.delete(id);
+  screenUpdate('favs', [...favIds]);
   document.querySelectorAll(`[data-fav="${CSS.escape(id)}"]`).forEach((b) => {
     b.classList.toggle('on', on);
     b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');
@@ -171,6 +284,8 @@ async function toggleFav(id) {
     toast(on ? 'Guardado nos favoritos ❤️' : 'Tirado dos favoritos');
   } catch (err) {
     on ? favIds.delete(id) : favIds.add(id);
+    screenUpdate('favs', [...favIds]);
+    paintHearts();
     fail(err);
   }
 }
@@ -183,7 +298,6 @@ async function startChat(productId, photoUrl) {
   } catch (err) { fail(err); }
 }
 
-// Cliques globais
 document.addEventListener('click', async (e) => {
   const fav = e.target.closest('[data-fav]');
   if (fav) { e.preventDefault(); e.stopPropagation(); toggleFav(fav.dataset.fav); return; }
@@ -201,12 +315,20 @@ document.addEventListener('click', async (e) => {
     else location.hash = '#/';
   }
 });
+// Formulários: a pessoa começou a mexer nesta tela (screenShow com guard não troca mais nada).
+document.addEventListener('input', () => { currentCtx.touched = true; }, true);
 
 // ===================================================================
 // Início
 // ===================================================================
-async function viewHome() {
-  const all = await api.listProducts({ limit: 300 });
+async function viewHome(ctx) {
+  await screenShow(ctx, 'inicio', loadHome, drawHome);
+  prefetchScreens();
+}
+
+let stopHero = null;
+function drawHome(all) {
+  stopHero?.();
   let featured = all.filter((p) => p.featured);
   if (featured.length < 2) featured = [...featured, ...all.filter((p) => !p.featured)].slice(0, 5);
   const used = categories.filter((c) => all.some((p) => p.category === c.slug));
@@ -275,24 +397,31 @@ async function viewHome() {
     const next = cards[(current + 1) % cards.length];
     track.scrollTo({ left: next.offsetLeft - (track.clientWidth - next.clientWidth) / 2, behavior: 'smooth' });
   }, 4500);
-  cleanups.push(() => { clearInterval(timer); io.disconnect(); });
+  stopHero = () => { clearInterval(timer); io.disconnect(); stopHero = null; };
+  cleanups.push(() => stopHero?.());
 }
 
 // ===================================================================
-// Buscar
+// Buscar (procura no cardápio guardado: abre e filtra na hora, sem esperar o banco)
 // ===================================================================
-async function viewSearch(_, query) {
-  let q = query.get('q') || '';
-  let cat = query.get('cat') || '';
-  let sort = query.get('ordem') || 'recent';
+function filterProducts(list, { q, cat, sort }) {
+  const words = norm(q).split(/\s+/).filter(Boolean);
+  let out = list.filter((p) => (!cat || p.category === cat) && words.every((w) => norm(`${p.title} ${p.description}`).includes(w)));
+  if (sort === 'price_asc') out = [...out].sort((a, b) => (a.price ?? 1e9) - (b.price ?? 1e9));
+  else if (sort === 'price_desc') out = [...out].sort((a, b) => (b.price ?? -1) - (a.price ?? -1));
+  return out;
+}
+
+async function viewSearch(ctx, _, query) {
+  const f = { q: query.get('q') || '', cat: query.get('cat') || '', sort: query.get('ordem') || 'recent' };
   $view.innerHTML = `<div class="page">
     <header class="page-head" style="flex-direction:column;align-items:stretch;gap:10px">
       <h1>Buscar</h1>
-      <label class="search-pill" style="margin:0">${I.search}<input id="q" class="grow" style="border:0;outline:0;background:none" type="search" enterkeyhint="search" placeholder="Macaron, brownie, suspiro…" value="${esc(q)}" autocomplete="off"></label>
+      <label class="search-pill" style="margin:0">${I.search}<input id="q" class="grow" style="border:0;outline:0;background:none" type="search" enterkeyhint="search" placeholder="Macaron, brownie, suspiro…" value="${esc(f.q)}" autocomplete="off"></label>
     </header>
     <div class="chips" id="cats">
-      <button class="chip ${cat ? '' : 'on'}" data-cat="">🍭 Todos</button>
-      ${categories.map((c) => `<button class="chip ${c.slug === cat ? 'on' : ''}" data-cat="${esc(c.slug)}">${esc(c.emoji)} ${esc(c.name)}</button>`).join('')}
+      <button class="chip ${f.cat ? '' : 'on'}" data-cat="">🍭 Todos</button>
+      ${categories.map((c) => `<button class="chip ${c.slug === f.cat ? 'on' : ''}" data-cat="${esc(c.slug)}">${esc(c.emoji)} ${esc(c.name)}</button>`).join('')}
     </div>
     <div class="row between pad" style="margin:6px 0 12px">
       <span class="small muted" id="count"></span>
@@ -300,52 +429,68 @@ async function viewSearch(_, query) {
         <option value="recent">Mais novos</option><option value="price_asc">Menor preço</option><option value="price_desc">Maior preço</option>
       </select>
     </div>
-    <div id="results"></div>
+    <div id="results">${skeletonGrid()}</div>
   </div>`;
   const $q = document.getElementById('q');
   const $results = document.getElementById('results');
-  document.getElementById('sort').value = sort;
+  document.getElementById('sort').value = f.sort;
   if (query.get('foco')) setTimeout(() => $q.focus(), 50);
-  const chipOn = document.querySelector('#cats .chip.on');
-  chipOn?.scrollIntoView({ inline: 'center', block: 'nearest' });
+  document.querySelector('#cats .chip.on')?.scrollIntoView({ inline: 'center', block: 'nearest' });
 
-  let seq = 0;
-  const run = async () => {
-    const my = ++seq;
+  let all = homeCached();
+  const draw = () => {
+    if (!ctx.alive()) return;
     const params = new URLSearchParams();
-    if (q) params.set('q', q);
-    if (cat) params.set('cat', cat);
-    if (sort !== 'recent') params.set('ordem', sort);
+    if (f.q) params.set('q', f.q);
+    if (f.cat) params.set('cat', f.cat);
+    if (f.sort !== 'recent') params.set('ordem', f.sort);
     history.replaceState(null, '', `#/buscar${params.size ? '?' + params : ''}`);
-    $results.innerHTML = `<div class="grid">${'<div class="skeleton" style="height:220px"></div>'.repeat(4)}</div>`;
-    try {
-      const list = await api.listProducts({ q, category: cat || undefined, sort });
-      if (my !== seq) return;
-      document.getElementById('count').textContent = `${list.length} ${list.length === 1 ? 'doce encontrado' : 'doces encontrados'}`;
-      $results.innerHTML = list.length ? `<div class="grid">${list.map(productCard).join('')}</div>`
-        : emptyBox('🔍', 'Nada por aqui', q ? `Não achamos "${esc(q)}". Que tal pedir sob encomenda?` : 'Ainda não há doces nesta categoria.',
-          '<a class="btn soft" href="#/adicionar">💌 Pedir sob encomenda</a>');
-    } catch (err) { fail(err); }
+    const list = filterProducts(all, f);
+    document.getElementById('count').textContent = `${list.length} ${list.length === 1 ? 'doce encontrado' : 'doces encontrados'}`;
+    $results.innerHTML = list.length ? `<div class="grid">${list.map(productCard).join('')}</div>`
+      : emptyBox('🔍', 'Nada por aqui', f.q ? `Não achamos "${esc(f.q)}". Que tal pedir sob encomenda?` : 'Ainda não há doces nesta categoria.',
+        '<a class="btn soft" href="#/adicionar">💌 Pedir sob encomenda</a>');
   };
   let t;
-  $q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { q = $q.value.trim(); run(); }, 280); });
+  $q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { f.q = $q.value.trim(); draw(); }, 120); });
   document.getElementById('cats').addEventListener('click', (e) => {
     const b = e.target.closest('[data-cat]');
     if (!b) return;
-    cat = b.dataset.cat;
+    f.cat = b.dataset.cat;
     document.querySelectorAll('#cats .chip').forEach((c) => c.classList.toggle('on', c === b));
     b.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
-    run();
+    draw();
   });
-  document.getElementById('sort').addEventListener('change', (e) => { sort = e.target.value; run(); });
-  run();
+  document.getElementById('sort').addEventListener('change', (e) => { f.sort = e.target.value; draw(); });
+  if (all.length) draw();
+  // Confere o cardápio com o banco; só redesenha a lista se mudou.
+  const fresh = await screenFetch('inicio', loadHome).catch((err) => { if (!all.length) throw err; return all; });
+  if (!sameJson(fresh, all) || !all.length) { all = fresh; draw(); }
 }
 
 // ===================================================================
 // Página do doce
 // ===================================================================
-async function viewProduct([id]) {
-  const p = await api.getProduct(id);
+async function viewProduct(ctx, [id]) {
+  // Abre na hora com o doce que já veio no cardápio (ou nos rascunhos) e confere com o banco.
+  if (!screenCached(`doce:${id}`)) {
+    const known = knownProduct(id);
+    if (known) screenUpdate(`doce:${id}`, known);
+  }
+  await screenShow(ctx, `doce:${id}`, () => api.getProduct(id), (p) => drawProduct(ctx, id, p));
+  // Relacionados: do cardápio guardado (o banco já foi conferido acima ou em segundo plano).
+  screenFetch('inicio', loadHome).then(() => ctx.alive() && drawRelated(id)).catch(() => {});
+}
+
+function drawRelated(id) {
+  const p = screenCached(`doce:${id}`);
+  const box = document.getElementById('related');
+  if (!p || !box || !p.category) return;
+  const rel = homeCached().filter((x) => x.category === p.category && x.id !== p.id).slice(0, 12);
+  box.innerHTML = rel.length ? `<div class="section-title"><h2>Você também vai amar 💕</h2></div><div class="hscroll">${rel.map(productCard).join('')}</div>` : '';
+}
+
+function drawProduct(ctx, id, p) {
   if (!p || (p.status !== 'published' && !isAdmin())) {
     $view.innerHTML = pageHead('Doce') + emptyBox('🥲', 'Este doce saiu do cardápio', 'Mas tem muita coisa gostosa esperando por você.', '<a class="btn" href="#/">Ver o cardápio</a>');
     return;
@@ -370,7 +515,7 @@ async function viewProduct([id]) {
       <p class="desc">${esc(p.description)}</p>
 
       <button class="chat-photo-cta" id="chat-photo" style="width:100%;text-align:left">
-        <img id="chat-thumb" src="${esc(p.photos[0])}" alt="">
+        <img id="chat-thumb" src="${esc(p.photos[0] || '')}" alt="">
         <div class="grow"><b>Conversar sobre esta foto</b><div class="small muted">Tire dúvidas, combine sabores, tamanho e entrega.</div></div>
         <span class="icon-btn" style="background:var(--primary);color:var(--on-primary);border:0">${I.chat}</span>
       </button>
@@ -384,6 +529,7 @@ async function viewProduct([id]) {
     </article>
     <section class="section" id="related"></section>
   </div>`;
+  drawRelated(id);
 
   const gal = document.getElementById('gal');
   let idx = 0;
@@ -410,17 +556,25 @@ async function viewProduct([id]) {
     } catch {}
   };
   document.getElementById('feat')?.addEventListener('click', async () => {
-    try { await api.saveProduct({ id: p.id, featured: !p.featured }); toast(p.featured ? 'Saiu dos destaques' : 'Agora está nos destaques ⭐'); render(); } catch (err) { fail(err); }
+    try {
+      const saved = await api.saveProduct({ id: p.id, featured: !p.featured });
+      screenUpdate(`doce:${p.id}`, saved);
+      toast(p.featured ? 'Saiu dos destaques' : 'Agora está nos destaques ⭐');
+      refreshProducts();
+      drawProduct(ctx, id, saved);
+    } catch (err) { fail(err); }
   });
   document.getElementById('unpub')?.addEventListener('click', async () => {
     if (!(await confirmSheet('Despublicar este doce?', 'Ele sai do cardápio e volta para os rascunhos. Você pode publicar de novo quando quiser.', 'Despublicar'))) return;
-    try { await api.saveProduct({ id: p.id, status: 'draft' }); toast('Voltou para os rascunhos'); location.hash = '#/revisar'; } catch (err) { fail(err); }
+    try {
+      await api.saveProduct({ id: p.id, status: 'draft' });
+      screenUpdate('inicio', homeCached().filter((x) => x.id !== p.id));
+      screenForget('rascunhos');
+      refreshProducts(p.id);
+      toast('Voltou para os rascunhos');
+      location.hash = '#/revisar';
+    } catch (err) { fail(err); }
   });
-
-  if (p.category) {
-    const rel = (await api.listProducts({ category: p.category, limit: 12 })).filter((x) => x.id !== p.id);
-    if (rel.length) document.getElementById('related').innerHTML = `<div class="section-title"><h2>Você também vai amar 💕</h2></div><div class="hscroll">${rel.map(productCard).join('')}</div>`;
-  }
 }
 
 // ===================================================================
@@ -430,15 +584,12 @@ async function viewAdd() {
   if (!user()) { $view.innerHTML = loginGate('💌', 'Peça sob encomenda', 'Entre com o Google para mandar a foto de uma inspiração e conversar com a gente.'); return; }
   if (!isAdmin()) return viewCustomOrder();
 
-  const drafts = await api.listProducts({ status: 'draft' });
   let mode = 'cada';
   let useAI = api.aiAvailable;
   $view.innerHTML = `<div class="page">
     ${pageHead('Adicionar doces', { back: false })}
     <div class="pad stack">
-      ${drafts.length ? `<a class="chat-photo-cta" href="#/revisar" style="margin:0"><span style="font-size:32px">📝</span>
-        <div class="grow"><b>${drafts.length} ${drafts.length === 1 ? 'rascunho esperando' : 'rascunhos esperando'} revisão</b><div class="small muted">Confira e publique</div></div><span>›</span></a>` : ''}
-
+      <div id="drafts-banner"></div>
       <label class="drop" id="drop">
         <span class="big">📸</span>
         <b>Escolha várias fotos de uma vez</b>
@@ -461,6 +612,15 @@ async function viewAdd() {
     </div>
   </div>`;
 
+  // Aviso dos rascunhos: na hora com o guardado, conferido com o banco em seguida.
+  const banner = (drafts) => {
+    const el = document.getElementById('drafts-banner');
+    if (el) el.innerHTML = drafts?.length ? `<a class="chat-photo-cta" href="#/revisar" style="margin:0"><span style="font-size:32px">📝</span>
+      <div class="grow"><b>${drafts.length} ${drafts.length === 1 ? 'rascunho esperando' : 'rascunhos esperando'} revisão</b><div class="small muted">Confira e publique</div></div><span>›</span></a>` : '';
+  };
+  banner(screenCached('rascunhos'));
+  screenFetch('rascunhos', loadDrafts).then(banner).catch(() => {});
+
   const $files = document.getElementById('files');
   const $drop = document.getElementById('drop');
   document.getElementById('mode').onclick = (e) => {
@@ -471,7 +631,7 @@ async function viewAdd() {
   };
   document.getElementById('ai').onchange = (e) => (useAI = e.target.checked);
   document.getElementById('manual').onclick = async () => {
-    try { await api.saveProduct({ status: 'draft' }); location.hash = '#/revisar'; } catch (err) { fail(err); }
+    try { await api.saveProduct({ status: 'draft' }); screenForget('rascunhos'); location.hash = '#/revisar'; } catch (err) { fail(err); }
   };
   $files.onchange = () => { if ($files.files.length) processBatch([...$files.files], mode, useAI); $files.value = ''; };
   ['dragenter', 'dragover'].forEach((t) => $drop.addEventListener(t, (e) => { e.preventDefault(); $drop.classList.add('over'); }));
@@ -484,7 +644,6 @@ async function viewAdd() {
 }
 
 const catMap = () => Object.fromEntries(categories.map((c) => [c.slug, c.name]));
-
 async function aiFor(blobOrFile) {
   const small = await resizePhoto(blobOrFile, 768, 0.8);
   return api.aiFill(await blobToBase64(small), catMap());
@@ -538,7 +697,6 @@ async function processBatch(files, mode, useAI) {
       it.set(`erro: ${err.message}`, 100, false);
     }
   };
-  // Duas fotos por vez: rápido sem travar o celular.
   const queue = [...items];
   await Promise.all([0, 1].map(async () => { while (queue.length) await work(queue.shift()); }));
 
@@ -555,6 +713,8 @@ async function processBatch(files, mode, useAI) {
     }
   }
   if (!created) return;
+  // Os rascunhos novos já ficam guardados: a revisão abre na hora.
+  await screenFetch('rascunhos', loadDrafts).catch(() => {});
   if (aiErrors) toast(`A IA não preencheu ${aiErrors} ${aiErrors === 1 ? 'foto' : 'fotos'}: complete à mão na revisão.`, 4500);
   $done.innerHTML = `<a class="btn block" href="#/revisar">Revisar e publicar (${created}) →</a>`;
   confetti();
@@ -571,7 +731,7 @@ function viewCustomOrder() {
         <b>Escolher foto de inspiração</b><span class="small muted">Da galeria ou da câmera</span>
         <input type="file" id="ins" accept="image/*" hidden></label>
       <label class="field"><span>O que você precisa?</span>
-        <textarea class="input" id="ins-text" rows="4" maxlength="1500" placeholder="Ex.: Bolo para 30 pessoas, tema jardim, para o dia 20. Massa de chocolate, se possível!"></textarea></label>
+        <textarea class="input" id="ins-text" rows="4" maxlength="1500" placeholder="Ex.: 60 macarons para casamento, tons de rosa e dourado, para o dia 20."></textarea></label>
       <button class="btn block" id="ins-send" disabled>💬 Enviar e conversar</button>
     </div>
   </div>`;
@@ -600,9 +760,12 @@ function viewCustomOrder() {
 // ===================================================================
 // Revisar rascunhos / editar doce
 // ===================================================================
-async function viewReview() {
+async function viewReview(ctx) {
   if (!isAdmin()) { location.hash = '#/adicionar'; return; }
-  const drafts = await api.listProducts({ status: 'draft' });
+  await screenShow(ctx, 'rascunhos', loadDrafts, (drafts) => drawReview(drafts), { guard: true });
+}
+
+function drawReview(drafts) {
   $view.innerHTML = `<div class="page">
     ${pageHead('Revisar antes de publicar', { right: drafts.length ? `<span class="count chip on" style="padding:6px 12px">${drafts.length}</span>` : '' })}
     ${drafts.length ? `<p class="pad muted small" style="margin:0 0 12px">Os campos com <span class="ai-badge">✨ IA</span> foram sugeridos pela inteligência artificial — confira antes de publicar. Tudo é salvo sozinho.</p>
@@ -618,19 +781,27 @@ async function viewReview() {
     if (!ready.length) { toast('Nenhum doce está completo ainda (título, valor e foto).'); return; }
     if (!(await confirmSheet(`Publicar ${ready.length} ${ready.length === 1 ? 'doce' : 'doces'}?`, 'Eles aparecem no cardápio na hora. Os incompletos continuam nos rascunhos.', 'Publicar'))) return;
     let n = 0;
-    for (const p of ready) { try { await api.saveProduct({ id: p.id, status: 'published' }); n++; } catch (err) { fail(err); } }
+    for (const p of ready) { try { await api.saveProduct({ id: p.id, status: 'published' }); ed.model.delete(p.id); n++; } catch (err) { fail(err); } }
+    screenUpdate('rascunhos', [...ed.model.values()]);
+    refreshProducts();
     toast(`${n} ${n === 1 ? 'doce publicado' : 'doces publicados'} 🎉`);
     confetti();
-    render();
+    drawReview([...ed.model.values()]);
   };
 }
 
-async function viewEdit([id]) {
+async function viewEdit(ctx, [id]) {
   if (!isAdmin()) { location.hash = '#/'; return; }
-  const p = await api.getProduct(id);
-  if (!p) { $view.innerHTML = pageHead('Editar') + emptyBox('🤷', 'Doce não encontrado', ''); return; }
-  $view.innerHTML = `<div class="page">${pageHead('Editar doce')}<div class="pad stack" id="editor">${editorCard(p, p.status === 'draft' ? 'draft' : 'edit', 0)}</div></div>`;
-  mountEditor(document.getElementById('editor'), [p], p.status === 'draft' ? 'draft' : 'edit');
+  if (!screenCached(`doce:${id}`)) {
+    const known = knownProduct(id);
+    if (known) screenUpdate(`doce:${id}`, known);
+  }
+  await screenShow(ctx, `doce:${id}`, () => api.getProduct(id), (p) => {
+    if (!p) { $view.innerHTML = pageHead('Editar') + emptyBox('🤷', 'Doce não encontrado', ''); return; }
+    const mode = p.status === 'draft' ? 'draft' : 'edit';
+    $view.innerHTML = `<div class="page">${pageHead('Editar doce')}<div class="pad stack" id="editor">${editorCard(p, mode, 0)}</div></div>`;
+    mountEditor(document.getElementById('editor'), [p], mode);
+  }, { guard: true });
 }
 
 const isComplete = (p) => p.title?.trim() && p.price != null && p.photos?.length;
@@ -648,7 +819,7 @@ function editorCard(p, mode, index) {
     </div>
     <div class="draft-body">
       <label class="field"><span>Título ${tag('title')}</span>
-        <input class="${cls('title', !p.title?.trim())}" data-f="title" value="${esc(p.title)}" maxlength="120" placeholder="Ex.: Bolo de cenoura com chocolate"></label>
+        <input class="${cls('title', !p.title?.trim())}" data-f="title" value="${esc(p.title)}" maxlength="120" placeholder="Ex.: Macaron de pistache"></label>
       <div class="grid-2">
         <label class="field"><span>Valor ${tag('price')}</span><div class="money">
           <input class="${cls('price', p.price == null)}" data-f="price" inputmode="decimal" value="${p.price == null ? '' : Number(p.price).toFixed(2).replace('.', ',')}" placeholder="0,00"></div></label>
@@ -657,7 +828,7 @@ function editorCard(p, mode, index) {
           ${categories.map((c) => `<option value="${esc(c.slug)}" ${c.slug === p.category ? 'selected' : ''}>${esc(c.emoji)} ${esc(c.name)}</option>`).join('')}</select></label>
       </div>
       <label class="field"><span>Descrição ${tag('description')}</span>
-        <textarea class="${cls('description')}" data-f="description" maxlength="2000" rows="3" placeholder="Conte do que é feito, tamanho, rendimento…">${esc(p.description)}</textarea></label>
+        <textarea class="${cls('description')}" data-f="description" maxlength="2000" rows="3" placeholder="Conte do que é feito, tamanho, quantidade mínima…">${esc(p.description)}</textarea></label>
       <div class="switch-row" style="padding:0"><div class="grow"><b>⭐ Destaque</b><div class="small muted">Aparece no carrossel do início</div></div>
         <label class="switch"><input type="checkbox" data-f="featured" ${p.featured ? 'checked' : ''}><i></i></label></div>
       <div class="small muted" data-status>${mode === 'draft' ? 'Rascunho salvo' : ''}</div>
@@ -682,12 +853,22 @@ function mountEditor(root, list, mode) {
   const cardOf = (id) => root.querySelector(`.draft[data-id="${CSS.escape(id)}"]`);
   const status = (id, t) => { const s = cardOf(id)?.querySelector('[data-status]'); if (s) s.textContent = t; };
   const payload = (p) => ({ id: p.id, title: p.title, price: p.price, description: p.description, category: p.category || null, featured: p.featured, photos: p.photos, ai_fields: p.ai_fields });
+  // Guarda o que já está salvo, para a próxima abertura mostrar a versão nova na hora.
+  const removed = new Set();
+  const remember = () => {
+    model.forEach((p) => screenUpdate(`doce:${p.id}`, p));
+    if (mode !== 'draft') return;
+    // Junta com a lista guardada (a edição de um rascunho só mexe nele).
+    const cur = (screenCached('rascunhos') || []).filter((x) => !removed.has(x.id)).map((x) => model.get(x.id) || x);
+    model.forEach((p) => { if (!cur.some((x) => x.id === p.id)) cur.push(p); });
+    screenUpdate('rascunhos', cur);
+  };
   const save = async (id) => {
     clearTimeout(timers.get(id)); timers.delete(id);
     const p = model.get(id);
     if (!p) return;
     status(id, 'Salvando…');
-    try { await api.saveProduct(payload(p)); status(id, 'Salvo ✓'); } catch (err) { status(id, 'Não salvou'); fail(err); }
+    try { await api.saveProduct(payload(p)); status(id, 'Salvo ✓'); remember(); } catch (err) { status(id, 'Não salvou'); fail(err); }
   };
   const schedule = (id) => {
     if (mode !== 'draft') { status(id, 'Alterações não salvas'); return; }
@@ -704,10 +885,13 @@ function mountEditor(root, list, mode) {
   const removeCard = (id) => {
     const c = cardOf(id);
     model.delete(id);
+    removed.add(id);
+    screenForget(`doce:${id}`);
+    remember();
     c.style.transition = 'all .35s'; c.style.opacity = '0'; c.style.transform = 'scale(.95)';
     setTimeout(() => {
       c.remove();
-      if (!root.children.length) render();
+      if (!root.children.length) drawReview([]);
       else [...root.children].forEach((el, i) => { if (i === 0) el.querySelector('[data-act="merge"]')?.remove(); });
     }, 350);
   };
@@ -763,6 +947,7 @@ function mountEditor(root, list, mode) {
         if (!isComplete(p)) { toast('Falta ' + [!p.title?.trim() && 'título', p.price == null && 'valor', !p.photos.length && 'foto'].filter(Boolean).join(', ') + '.'); return; }
         b.disabled = true;
         await api.saveProduct({ ...payload(p), status: 'published' });
+        refreshProducts(id);
         toast('Publicado! Já está no cardápio 🎉');
         removeCard(id);
       } else if (act === 'ai') {
@@ -788,16 +973,23 @@ function mountEditor(root, list, mode) {
         if (!(await confirmSheet('Excluir este doce?', 'As fotos e os dados dele serão apagados.', 'Excluir', true))) return;
         clearTimeout(timers.get(id)); timers.delete(id);
         await api.deleteProduct(p);
+        screenUpdate('inicio', homeCached().filter((x) => x.id !== id));
+        refreshProducts(id);
         toast('Doce excluído');
         if (mode === 'edit') { location.hash = '#/'; return; }
         removeCard(id);
       } else if (act === 'save') {
         if (!isComplete(p)) { toast('Um doce publicado precisa de título, valor e foto.'); return; }
         await save(id);
+        screenUpdate('inicio', homeCached().map((x) => (x.id === id ? { ...x, ...payload(p) } : x)));
+        refreshProducts();
         toast('Alterações salvas ✓');
         location.hash = `#/doce/${id}`;
       } else if (act === 'unpublish') {
         await api.saveProduct({ ...payload(p), status: 'draft' });
+        screenUpdate('inicio', homeCached().filter((x) => x.id !== id));
+        screenForget('rascunhos');
+        refreshProducts(id);
         toast('Voltou para os rascunhos');
         location.hash = '#/revisar';
       }
@@ -820,13 +1012,16 @@ const isUnread = (c) => {
   const seen = isAdmin() && c.customer_id !== u.id ? c.admin_read_at : c.customer_read_at;
   return new Date(c.last_message_at) > new Date(seen);
 };
-async function refreshUnread() {
-  if (!user()) { unreadCount = 0; } else {
-    try { unreadCount = (await api.listConversations()).filter(isUnread).length; } catch { /* sem rede */ }
-  }
+function paintUnread(list) {
+  unreadCount = user() ? (list || []).filter(isUnread).length : 0;
   $badge.hidden = !unreadCount;
   $badge.textContent = unreadCount > 9 ? '9+' : unreadCount;
   if ('setAppBadge' in navigator) (unreadCount ? navigator.setAppBadge(unreadCount) : navigator.clearAppBadge()).catch?.(() => {});
+}
+async function refreshUnread() {
+  if (!user()) { paintUnread([]); return; }
+  paintUnread(screenCached('chat'));
+  try { paintUnread(await screenFetch('chat', loadChats)); } catch { /* sem rede */ }
 }
 
 const convRow = (c) => {
@@ -839,106 +1034,144 @@ const convRow = (c) => {
     <span class="stack" style="gap:6px;justify-items:end"><span class="conv-time">${fmtTime(c.last_message_at)}</span>${un ? '<span class="unread-dot"></span>' : ''}</span></a>`;
 };
 
-async function viewChats() {
+async function viewChats(ctx) {
   if (!user()) { $view.innerHTML = loginGate('💬', 'Converse com a gente', 'Toque em "Conversar sobre esta foto" em qualquer doce. Entre com o Google para ver suas conversas.'); return; }
-  const draw = async () => {
-    const list = await api.listConversations();
+  const draw = (list) => {
     $view.innerHTML = `<div class="page">${pageHead(isAdmin() ? 'Conversas com clientes' : 'Chat', { back: false })}
       ${list.length ? `<div>${list.map(convRow).join('')}</div>`
       : emptyBox('💬', 'Nenhuma conversa ainda', 'Cada conversa nasce de uma foto: abra um doce e toque em <b>Conversar sobre esta foto</b>.', '<a class="btn" href="#/">Ver o cardápio</a>')}</div>`;
   };
-  await draw();
-  const h = () => draw();
+  // Mensagem nova: confere a lista e redesenha.
+  const h = () => screenFetch('chat', loadChats).then((l) => ctx.alive() && draw(l)).catch(() => {});
   chatHandlers.add(h);
   cleanups.push(() => chatHandlers.delete(h));
+  await screenShow(ctx, 'chat', loadChats, draw);
 }
 
-async function viewChat([id]) {
+async function viewChat(ctx, [id]) {
   if (!user()) { $view.innerHTML = loginGate('💬', 'Entre para ver a conversa', ''); return; }
-  const c = await api.getConversation(id);
-  if (!c) { $view.innerHTML = pageHead('Chat') + emptyBox('🤷', 'Conversa não encontrada', ''); return; }
   const me = user().id;
-  const adminView = isAdmin() && c.customer_id !== me;
-  const product = c.product_id ? await api.getProduct(c.product_id) : null;
-  let msgs = await api.listMessages(id);
+  const key = `conversa:${id}`;
+  // Abre na hora com o que já se sabe (a conversa da lista e o doce do cardápio).
+  let st = screenCached(key);
+  if (!st) {
+    const c = (screenCached('chat') || []).find((x) => x.id === id);
+    if (c) st = { c, product: c.product_id ? knownProduct(c.product_id) || null : null, msgs: null };
+  }
+  let pageDrawn = false;
+  let msgs = st?.msgs || null;
 
-  $view.innerHTML = `<div class="chat-page">
-    <header class="page-head">
-      <button class="icon-btn" data-back aria-label="Voltar">${I.back}</button>
-      <img src="${esc(c.photo_url)}" alt="" style="width:42px;height:42px;border-radius:12px;object-fit:cover">
-      <div class="grow"><div style="font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.title)}</div>
-        <div class="small muted">${adminView ? esc(c.customer?.name || 'Cliente') : `${esc(settings.app_name)} · responde rapidinho`}</div></div>
-      ${adminView && c.customer?.whatsapp ? `<a class="icon-btn" style="color:#25d366" target="_blank" rel="noopener" href="${esc(waLink(c.customer.whatsapp, `Olá, ${firstName(c.customer.name)}! Aqui é da ${settings.app_name}.`))}" aria-label="WhatsApp do cliente">${I.whats}</a>` : ''}
-    </header>
-    <div class="chat-scroll" id="msgs"></div>
-    ${!adminView ? `<div class="quick" id="quick">${['Ainda tem disponível?', 'Qual o prazo?', 'Faz em outro tamanho?', 'Quero encomendar! 🙌'].map((t) => `<button class="chip">${t}</button>`).join('')}</div>` : ''}
-    <form class="chat-input" id="form">
-      <textarea class="input" id="text" rows="1" maxlength="2000" placeholder="Escreva sua mensagem…" enterkeyhint="send"></textarea>
-      <button class="send-btn" aria-label="Enviar">${I.send}</button>
-    </form>
-  </div>`;
+  const loadAll = async () => {
+    const c = await api.getConversation(id);
+    if (!c) return { c: null };
+    const [product, list] = await Promise.all([c.product_id ? api.getProduct(c.product_id) : null, api.listMessages(id)]);
+    return { c, product, msgs: list };
+  };
+  const remember = () => screenUpdate(key, { ...st, msgs });
 
-  const $msgs = document.getElementById('msgs');
-  const about = `<div class="chat-about"><img src="${esc(c.photo_url)}" alt="">
-    <div><b>Conversa sobre esta foto</b>${product ? `<br>${esc(product.title)} · <b>${money(product.price)}</b><br><a href="#/doce/${esc(product.id)}" style="color:var(--primary);font-weight:800">Ver doce →</a>` : '<br><span class="muted">Foto de inspiração para encomenda</span>'}</div></div>`;
-  const draw = () => {
+  const drawMsgs = () => {
+    const $msgs = document.getElementById('msgs');
+    if (!$msgs) return;
+    const adminView = isAdmin() && st.c.customer_id !== me;
+    const p = st.product;
+    const about = `<div class="chat-about"><img src="${esc(st.c.photo_url)}" alt="">
+      <div><b>Conversa sobre esta foto</b>${p ? `<br>${esc(p.title)} · <b>${money(p.price)}</b><br><a href="#/doce/${esc(p.id)}" style="color:var(--primary);font-weight:800">Ver doce →</a>` : '<br><span class="muted">Foto de inspiração para encomenda</span>'}</div></div>`;
     let lastDay = '';
-    $msgs.innerHTML = about + msgs.map((m) => {
+    $msgs.innerHTML = about + (msgs == null ? '<p class="center muted small"><span class="spin" style="display:inline-block;vertical-align:middle"></span></p>' : msgs.map((m) => {
       const day = fmtDay(m.created_at);
       const sep = day !== lastDay ? `<div class="day-sep">${day}</div>` : '';
       lastDay = day;
       return `${sep}<div class="bubble ${m.sender_id === me ? 'me' : 'them'}">${esc(m.body)}<time>${new Date(m.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></div>`;
-    }).join('') + (msgs.length ? '' : `<p class="center muted small">${adminView ? 'O cliente ainda não escreveu.' : 'Diga oi! A gente responde por aqui e avisa no seu celular. 💕'}</p>`);
+    }).join('') + (msgs.length ? '' : `<p class="center muted small">${adminView ? 'O cliente ainda não escreveu.' : 'Diga oi! A gente responde por aqui e avisa no seu celular. 💕'}</p>`));
     $msgs.scrollTop = $msgs.scrollHeight;
     const q = document.getElementById('quick');
-    if (q) q.hidden = msgs.filter((m) => m.sender_id === me).length > 1;
+    if (q) q.hidden = (msgs || []).filter((m) => m.sender_id === me).length > 1;
   };
-  draw();
-  api.markRead(id).then(refreshUnread);
 
-  const $text = document.getElementById('text');
-  const grow = () => { $text.style.height = 'auto'; $text.style.height = Math.min($text.scrollHeight, 120) + 'px'; };
-  $text.addEventListener('input', grow);
-  $text.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && matchMedia('(hover: hover)').matches) { e.preventDefault(); document.getElementById('form').requestSubmit(); }
-  });
-  const send = async (body) => {
-    body = body.trim();
-    if (!body) return;
-    const temp = { id: `tmp-${Date.now()}`, sender_id: me, body, created_at: new Date().toISOString() };
-    msgs.push(temp);
-    draw();
-    try {
-      const saved = await api.sendMessage(id, body);
-      const i = msgs.indexOf(temp);
-      if (msgs.some((m) => m.id === saved.id)) msgs.splice(i, 1); else msgs[i] = saved;
-      draw();
-    } catch (err) {
-      msgs = msgs.filter((m) => m !== temp);
-      draw();
-      $text.value = body;
-      fail(err);
-    }
+  const drawPage = () => {
+    pageDrawn = true;
+    const c = st.c;
+    const adminView = isAdmin() && c.customer_id !== me;
+    $view.innerHTML = `<div class="chat-page">
+      <header class="page-head">
+        <button class="icon-btn" data-back aria-label="Voltar">${I.back}</button>
+        <img src="${esc(c.photo_url)}" alt="" style="width:42px;height:42px;border-radius:12px;object-fit:cover">
+        <div class="grow"><div style="font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.title)}</div>
+          <div class="small muted">${adminView ? esc(c.customer?.name || 'Cliente') : `${esc(settings.app_name)} · responde rapidinho`}</div></div>
+        ${adminView && c.customer?.whatsapp ? `<a class="icon-btn" style="color:#25d366" target="_blank" rel="noopener" href="${esc(waLink(c.customer.whatsapp, `Olá, ${firstName(c.customer.name)}! Aqui é da ${settings.app_name}.`))}" aria-label="WhatsApp do cliente">${I.whats}</a>` : ''}
+      </header>
+      <div class="chat-scroll" id="msgs"></div>
+      ${!adminView ? `<div class="quick" id="quick">${['Ainda tem disponível?', 'Qual o prazo?', 'Faz em outra cor?', 'Quero encomendar! 🙌'].map((t) => `<button class="chip">${t}</button>`).join('')}</div>` : ''}
+      <form class="chat-input" id="form">
+        <textarea class="input" id="text" rows="1" maxlength="2000" placeholder="Escreva sua mensagem…" enterkeyhint="send"></textarea>
+        <button class="send-btn" aria-label="Enviar">${I.send}</button>
+      </form>
+    </div>`;
+    drawMsgs();
+
+    const $text = document.getElementById('text');
+    const grow = () => { $text.style.height = 'auto'; $text.style.height = Math.min($text.scrollHeight, 120) + 'px'; };
+    $text.addEventListener('input', grow);
+    $text.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && matchMedia('(hover: hover)').matches) { e.preventDefault(); document.getElementById('form').requestSubmit(); }
+    });
+    const send = async (body) => {
+      body = body.trim();
+      if (!body) return;
+      msgs ||= [];
+      const temp = { id: `tmp-${Date.now()}`, sender_id: me, body, created_at: new Date().toISOString() };
+      msgs.push(temp);
+      drawMsgs();
+      try {
+        const saved = await api.sendMessage(id, body);
+        const i = msgs.indexOf(temp);
+        if (msgs.some((m) => m.id === saved.id)) msgs.splice(i, 1); else msgs[i] = saved;
+        remember();
+        drawMsgs();
+      } catch (err) {
+        msgs = msgs.filter((m) => m !== temp);
+        drawMsgs();
+        $text.value = body;
+        fail(err);
+      }
+    };
+    document.getElementById('form').onsubmit = (e) => {
+      e.preventDefault();
+      const v = $text.value;
+      $text.value = '';
+      grow();
+      send(v);
+      $text.focus();
+    };
+    document.getElementById('quick')?.addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (b) send(b.textContent); });
   };
-  document.getElementById('form').onsubmit = (e) => {
-    e.preventDefault();
-    const v = $text.value;
-    $text.value = '';
-    grow();
-    send(v);
-    $text.focus();
-  };
-  document.getElementById('quick')?.addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (b) send(b.textContent); });
 
   const h = (m) => {
-    if (!m || m.conversation_id !== id || msgs.some((x) => x.id === m.id)) return;
+    if (!m || m.conversation_id !== id || !msgs || msgs.some((x) => x.id === m.id)) return;
     if (m.sender_id === me && msgs.some((x) => String(x.id).startsWith('tmp-') && x.body === m.body)) return;
     msgs.push(m);
-    draw();
+    remember();
+    drawMsgs();
     api.markRead(id).then(refreshUnread);
   };
   chatHandlers.add(h);
   cleanups.push(() => chatHandlers.delete(h));
+
+  if (st?.c) drawPage();
+  const fresh = await loadAll().catch((err) => { if (st?.c) return null; throw err; });
+  if (!ctx.alive()) return;
+  if (fresh) {
+    if (!fresh.c) { $view.innerHTML = pageHead('Chat') + emptyBox('🤷', 'Conversa não encontrada', ''); return; }
+    // Mensagens que chegaram em tempo real enquanto o banco respondia continuam na tela.
+    const extra = (msgs || []).filter((m) => !String(m.id).startsWith('tmp-') && !fresh.msgs.some((x) => x.id === m.id));
+    const nextMsgs = [...fresh.msgs, ...extra];
+    const changed = !sameJson(nextMsgs, msgs) || !sameJson(fresh.product, st?.product);
+    st = { c: fresh.c, product: fresh.product };
+    msgs = nextMsgs;
+    remember();
+    if (!pageDrawn) drawPage(); else if (changed) drawMsgs();
+  }
+  api.markRead(id).then(refreshUnread);
 }
 
 function startRealtime() {
@@ -955,14 +1188,14 @@ function startRealtime() {
 // ===================================================================
 // Menu, perfil, favoritos
 // ===================================================================
-async function viewMenu() {
+function viewMenu() {
   const u = user();
-  const drafts = isAdmin() ? (await api.listProducts({ status: 'draft' })).length : 0;
-  const notif = u ? await pushActive() : false;
+  const drafts = isAdmin() ? (screenCached('rascunhos') || []).length : 0;
   const theme = (() => { try { return localStorage.getItem('cd-tema') || ''; } catch { return ''; } })();
   const themeLabel = { '': 'Automático', light: 'Claro', dark: 'Escuro' }[theme];
   const li = (href, ico, label, right = '<span class="chev">›</span>', attrs = '') =>
     `<${href ? `a href="${href}"` : 'button'} class="li" ${attrs}><span class="li-ico">${ico}</span><span class="grow">${label}</span>${right}</${href ? 'a' : 'button'}>`;
+  const count = (n, id) => `<span id="${id}">${n ? `<span class="count">${n}</span>` : '<span class="chev">›</span>'}</span>`;
 
   $view.innerHTML = `<div class="page">
     ${pageHead('Menu', { back: false })}
@@ -972,21 +1205,21 @@ async function viewMenu() {
         <div class="grow"><h2>${esc(u.name)}</h2><div style="opacity:.85;font-size:14px;overflow:hidden;text-overflow:ellipsis">${esc(u.email)}</div>
         ${isAdmin() ? '<span class="chip" style="margin-top:6px;background:rgba(255,255,255,.25);border:0;color:#fff;padding:3px 10px;font-size:12px">👑 Administrador</span>' : ''}</div></div>
         <a class="btn sm" href="#/perfil" style="margin-top:14px;background:#fff;color:#3b2a2f;position:relative;z-index:1">Editar perfil</a>`
-      : `<div style="position:relative;z-index:1"><div style="font-size:40px">🍰</div><h2>Faça parte da Cozinha Doce</h2>
+      : `<div style="position:relative;z-index:1"><div style="font-size:40px">🍰</div><h2>Faça parte da ${esc(settings.app_name)}</h2>
         <p style="opacity:.9;margin:6px 0 14px">Entre para favoritar, conversar sobre os doces e receber novidades.</p>${googleBtn()}</div>`}
     </section>
 
     ${u ? `<div class="list-title">Minha conta</div><nav class="list">
       ${li('#/perfil', '👤', 'Meu perfil')}
-      ${li('#/favoritos', '❤️', 'Favoritos', favIds.size ? `<span class="count">${favIds.size}</span>` : '<span class="chev">›</span>')}
-      ${li('#/chat', '💬', 'Mensagens', unreadCount ? `<span class="count">${unreadCount}</span>` : '<span class="chev">›</span>')}
-      <div class="li"><span class="li-ico">🔔</span><span class="grow">Notificações no celular</span><label class="switch"><input type="checkbox" id="notif" ${notif ? 'checked' : ''}><i></i></label></div>
+      ${li('#/favoritos', '❤️', 'Favoritos', count(favIds.size, 'm-favs'))}
+      ${li('#/chat', '💬', 'Mensagens', count(unreadCount, 'm-chat'))}
+      <div class="li"><span class="li-ico">🔔</span><span class="grow">Notificações no celular</span><label class="switch"><input type="checkbox" id="notif"><i></i></label></div>
     </nav>` : ''}
 
     ${isAdmin() ? `<div class="list-title">Administração</div><nav class="list">
-      ${li('#/admin/aparencia', '🎨', 'Aparência: cor e ícone')}
+      ${li('#/admin/aparencia', '🎨', 'Aparência: cores e ícone')}
       ${li('#/admin/categorias', '🏷️', 'Categorias')}
-      ${li('#/revisar', '📝', 'Rascunhos', drafts ? `<span class="count">${drafts}</span>` : '<span class="chev">›</span>')}
+      ${li('#/revisar', '📝', 'Rascunhos', count(drafts, 'm-drafts'))}
       ${li('#/admin/novidades', '📧', 'Quem quer novidades por e-mail')}
     </nav>` : ''}
 
@@ -1000,18 +1233,29 @@ async function viewMenu() {
     <p class="center small muted" style="margin:22px 0 0">${esc(settings.app_name)} · feito com 💕</p>
   </div>`;
 
-  document.getElementById('notif')?.addEventListener('change', (e) => togglePush(e.target));
+  // Números e o interruptor chegam depois, sem segurar a tela.
+  const $notif = document.getElementById('notif');
+  if ($notif) {
+    pushActive().then((on) => { $notif.checked = on; }).catch(() => {});
+    $notif.addEventListener('change', (e) => togglePush(e.target));
+  }
+  if (isAdmin()) screenFetch('rascunhos', loadDrafts).then((d) => {
+    const el = document.getElementById('m-drafts');
+    if (el) el.innerHTML = d.length ? `<span class="count">${d.length}</span>` : '<span class="chev">›</span>';
+  }).catch(() => {});
   document.getElementById('theme').onclick = () => {
     const next = { '': 'light', light: 'dark', dark: '' }[theme];
     try { next ? localStorage.setItem('cd-tema', next) : localStorage.removeItem('cd-tema'); } catch {}
     applyTheme();
-    render();
+    viewMenu();
   };
   document.getElementById('install')?.addEventListener('click', showInstall);
   document.getElementById('logout')?.addEventListener('click', async () => {
     if (!(await confirmSheet('Sair da conta?', 'Você continua vendo o cardápio, mas sem favoritos e conversas.', 'Sair'))) return;
+    const id = user()?.id;
     await disablePush(api).catch(() => {});
     await api.signOut();
+    if (id) screenForgetUser(id);
     toast('Até logo! 👋');
   });
 }
@@ -1044,11 +1288,19 @@ function showInstall() {
     <button class="btn block" data-close>Entendi</button>`);
 }
 
-async function viewProfile() {
+async function viewProfile(ctx) {
   if (!user()) { $view.innerHTML = loginGate('👤', 'Seu perfil', 'Entre com o Google para salvar seus dados e receber mensagens.'); return; }
-  const [p, convs, notif] = await Promise.all([api.getProfile(), api.listConversations(), pushActive()]);
+  const u = user();
+  // Primeira vez sem nada guardado: já abre com o nome e o e-mail da conta.
+  if (!screenCached('perfil')) screenUpdate('perfil', { id: u.id, name: u.name, email: u.email, avatar_url: u.avatar, categories: [], email_news: false, push_news: false, _provisorio: true });
+  await screenShow(ctx, 'perfil', () => api.getProfile(), (p) => drawProfile(ctx, p), { guard: true });
+}
+
+function drawProfile(ctx, p) {
   const chosen = new Set(p.categories || []);
   const u = user();
+  const msgsBox = (convs) => (convs?.length ? `<div style="margin:0 -18px">${convs.slice(0, 3).map(convRow).join('')}</div>`
+    : '<p class="muted small" style="margin:0">Quando a gente responder, as mensagens aparecem aqui e no seu celular.</p>');
   $view.innerHTML = `<div class="page">
     ${pageHead('Meu perfil')}
     <div class="pad stack">
@@ -1059,7 +1311,7 @@ async function viewProfile() {
 
       <div class="card stack">
         <div class="row between"><h2 style="font-size:19px">💬 Mensagens</h2><a href="#/chat" class="small" style="color:var(--primary);font-weight:800">Ver todas</a></div>
-        ${convs.length ? `<div style="margin:0 -18px">${convs.slice(0, 3).map(convRow).join('')}</div>` : '<p class="muted small" style="margin:0">Quando a gente responder, as mensagens aparecem aqui e no seu celular.</p>'}
+        <div id="p-msgs">${msgsBox(screenCached('chat'))}</div>
       </div>
 
       <form class="card stack" id="pf">
@@ -1073,30 +1325,34 @@ async function viewProfile() {
           <div class="switch-row"><div class="grow"><b>📧 Novidades por e-mail</b><div class="small muted">Lançamentos e promoções, sem exagero.</div></div>
             <label class="switch"><input type="checkbox" name="email_news" ${p.email_news ? 'checked' : ''}><i></i></label></div>
           <div class="switch-row"><div class="grow"><b>🔔 Notificações no celular</b><div class="small muted">Respostas do chat neste aparelho.</div></div>
-            <label class="switch"><input type="checkbox" id="pnotif" ${notif ? 'checked' : ''}><i></i></label></div>
+            <label class="switch"><input type="checkbox" id="pnotif"><i></i></label></div>
           <div class="switch-row"><div class="grow"><b>🍰 Avisar doce novo</b><div class="small muted">Notificação quando sair doce das suas categorias.</div></div>
             <label class="switch"><input type="checkbox" name="push_news" ${p.push_news ? 'checked' : ''}><i></i></label></div>
         </div>
-        <button class="btn block">Salvar perfil</button>
+        <button class="btn block" ${p._provisorio ? 'disabled' : ''} id="pf-save">Salvar perfil</button>
       </form>
       <button class="btn danger block" id="del">Excluir minha conta</button>
     </div>
   </div>`;
 
+  screenFetch('chat', loadChats).then((l) => { const el = document.getElementById('p-msgs'); if (ctx.alive() && el) el.innerHTML = msgsBox(l); }).catch(() => {});
+  const $pn = document.getElementById('pnotif');
+  pushActive().then((on) => { $pn.checked = on; }).catch(() => {});
+
   document.getElementById('pcats').onclick = (e) => {
     const b = e.target.closest('[data-c]');
     if (!b) return;
+    ctx.touched = true;
     chosen.has(b.dataset.c) ? chosen.delete(b.dataset.c) : chosen.add(b.dataset.c);
     b.classList.toggle('on');
   };
   const form = document.getElementById('pf');
   form.whatsapp.addEventListener('input', (e) => { e.target.value = fmtPhone(e.target.value.replace(/\D/g, '').slice(0, 11)); });
-  document.getElementById('pnotif').onchange = (e) => togglePush(e.target);
+  $pn.onchange = (e) => togglePush(e.target);
   form.push_news.addEventListener('change', async (e) => {
     if (e.target.checked && !(await pushActive())) {
-      const n = document.getElementById('pnotif');
-      n.checked = true;
-      if (!(await togglePush(n))) e.target.checked = false;
+      $pn.checked = true;
+      if (!(await togglePush($pn))) e.target.checked = false;
     }
   });
   form.onsubmit = async (e) => {
@@ -1104,22 +1360,34 @@ async function viewProfile() {
     const wa = form.whatsapp.value.replace(/\D/g, '');
     if (wa && (wa.length < 10 || wa.length > 11)) { toast('Confira o WhatsApp com DDD.'); return; }
     try {
-      await api.saveProfile({ name: form.name.value.trim() || null, whatsapp: wa || null, region: form.region.value.trim() || null, categories: [...chosen], email_news: form.email_news.checked, push_news: form.push_news.checked });
+      const saved = await api.saveProfile({ name: form.name.value.trim() || null, whatsapp: wa || null, region: form.region.value.trim() || null, categories: [...chosen], email_news: form.email_news.checked, push_news: form.push_news.checked });
+      screenUpdate('perfil', saved);
       toast('Perfil salvo ✓');
     } catch (err) { fail(err); }
   };
   document.getElementById('del').onclick = async () => {
     if (!(await confirmSheet('Excluir sua conta?', 'Apagamos seu perfil, favoritos e conversas. Isso não tem volta.', 'Excluir para sempre', true))) return;
-    try { await disablePush(api).catch(() => {}); await api.deleteAccount(); toast('Conta excluída. Sentiremos sua falta 💔'); location.hash = '#/'; } catch (err) { fail(err); }
+    try {
+      const id = user().id;
+      await disablePush(api).catch(() => {});
+      await api.deleteAccount();
+      screenForgetUser(id);
+      toast('Conta excluída. Sentiremos sua falta 💔');
+      location.hash = '#/';
+    } catch (err) { fail(err); }
   };
 }
 
-async function viewFavorites() {
+async function viewFavorites(ctx) {
   if (!user()) { $view.innerHTML = loginGate('❤️', 'Seus favoritos', 'Entre com o Google para guardar os doces que você amou.'); return; }
-  const list = await api.listProducts({ ids: [...favIds] });
-  $view.innerHTML = `<div class="page">${pageHead('Favoritos')}
-    ${list.length ? `<div class="grid">${list.map(productCard).join('')}</div>`
-    : emptyBox('💝', 'Nenhum favorito ainda', 'Toque no coração dos doces que você amar para guardar aqui.', '<a class="btn" href="#/">Explorar doces</a>')}</div>`;
+  // Os favoritos são doces do cardápio: filtra o cardápio guardado (na hora) e confere com o banco.
+  await screenShow(ctx, 'inicio', loadHome, (all) => {
+    const byId = new Map(all.map((p) => [p.id, p]));
+    const list = [...favIds].map((id) => byId.get(id)).filter(Boolean);
+    $view.innerHTML = `<div class="page">${pageHead('Favoritos')}
+      ${list.length ? `<div class="grid">${list.map(productCard).join('')}</div>`
+      : emptyBox('💝', 'Nenhum favorito ainda', 'Toque no coração dos doces que você amar para guardar aqui.', '<a class="btn" href="#/">Explorar doces</a>')}</div>`;
+  });
 }
 
 // ===================================================================
@@ -1129,17 +1397,26 @@ const PRESETS = [
   ['Morango', '#e5568a'], ['Framboesa', '#c2185b'], ['Chocolate', '#7b4a2e'], ['Caramelo', '#d9822b'],
   ['Pistache', '#5a9b4c'], ['Menta', '#2a9d8f'], ['Lavanda', '#8a6fd1'], ['Mirtilo', '#4a6fd8'],
 ];
-async function viewAppearance() {
+const swatches = (id, chosen) => `<div class="swatches" id="${id}">${PRESETS.map(([n, c]) => `<button type="button" class="swatch ${c === chosen ? 'on' : ''}" style="background:${c}" data-c="${c}" title="${n}" aria-label="${n}"></button>`).join('')}
+  <label class="swatch custom ${chosen && !PRESETS.some(([, c]) => c === chosen) ? 'on' : ''}" title="Outra cor"><input type="color" value="${esc(chosen || '#e5568a')}"></label></div>`;
+const markSwatch = (box, c) => box.querySelectorAll('.swatch').forEach((x) => x.classList.toggle('on', x.dataset.c === c || (x.classList.contains('custom') && !!c && !PRESETS.some(([, p]) => p === c))));
+
+// Aparência: abre na hora com a aparência que o app já está usando.
+function viewAppearance() {
   if (!isAdmin()) { location.hash = '#/menu'; return; }
   const s = { ...settings };
+  // Ícone: 'manter' (o atual), 'macaron' (desenho com o fundo escolhido), 'foto' (imagem enviada) ou 'padrao'.
+  let iconMode = 'manter';
+  let iconBg = (() => { try { return localStorage.getItem('cd-icone-fundo') || '#e5568a'; } catch { return '#e5568a'; } })();
   let iconFile = null;
-  let resetIcon = false;
+  const iconPreview = () => (iconMode === 'macaron' ? iconDataUrl(iconBg) : iconMode === 'foto' ? URL.createObjectURL(iconFile) : iconMode === 'padrao' ? 'icons/icon-512.png' : appIcon(true));
+
   $view.innerHTML = `<div class="page">${pageHead('Aparência')}
     <div class="pad stack">
       <div class="card stack">
         <h2 style="font-size:19px">🎨 Cor do app</h2>
-        <div class="swatches" id="sw">${PRESETS.map(([n, c]) => `<button class="swatch ${c === s.primary_color ? 'on' : ''}" style="background:${c}" data-c="${c}" title="${n}" aria-label="${n}"></button>`).join('')}
-          <label class="swatch custom ${PRESETS.some(([, c]) => c === s.primary_color) ? '' : 'on'}" title="Outra cor"><input type="color" id="custom" value="${esc(s.primary_color)}"></label></div>
+        <p class="small muted" style="margin:-6px 0 0">Botões, preços, menus e destaques de todas as telas.</p>
+        ${swatches('sw', s.primary_color)}
         <div class="preview-phone">
           <div class="row"><img class="brand-logo" id="pv-icon" src="${esc(appIcon(false))}" alt=""><div><div class="brand-name" id="pv-name">${esc(s.app_name)}</div><div class="brand-tag" id="pv-tag">${esc(s.tagline)}</div></div></div>
           <div class="row"><span class="btn sm">Botão</span><span class="chip on">Chip</span><span class="pcard-price">R$ 42,00</span></div>
@@ -1148,10 +1425,17 @@ async function viewAppearance() {
 
       <div class="card stack">
         <h2 style="font-size:19px">🧁 Ícone do app</h2>
-        <div class="row"><img class="icon-preview" id="icon-prev" src="${esc(appIcon(true))}" alt="">
-          <div class="stack grow" style="gap:8px"><label class="btn sm soft">Trocar ícone<input type="file" id="icon" accept="image/*" hidden></label>
-          <button class="btn sm ghost" id="icon-reset" ${s.icon_url ? '' : 'hidden'}>Usar o ícone padrão</button></div></div>
-        <p class="small muted" style="margin:0">Use uma imagem quadrada (o centro é recortado). Quem instalar o app depois da troca já recebe o ícone novo; quem já instalou pode precisar reinstalar.</p>
+        <div class="row" style="align-items:flex-start"><img class="icon-preview" id="icon-prev" src="${esc(iconPreview())}" alt="">
+          <div class="grow stack" style="gap:8px">
+            <b class="small">Cor do fundo do ícone</b>
+            ${swatches('isw', iconMode === 'macaron' ? iconBg : null)}
+            <button type="button" class="btn sm ghost" id="icon-same">Igual à cor do app</button>
+          </div></div>
+        <div class="row" style="flex-wrap:wrap">
+          <label class="btn sm soft">📷 Usar minha imagem<input type="file" id="icon" accept="image/*" hidden></label>
+          <button type="button" class="btn sm ghost" id="icon-reset">Ícone padrão (rosa)</button>
+        </div>
+        <p class="small muted" style="margin:0">Escolha uma cor de fundo para o macaron ou envie uma imagem quadrada. Quem instalar o app depois da troca já recebe o ícone novo; quem já instalou pode precisar reinstalar.</p>
       </div>
 
       <form class="card stack" id="af">
@@ -1163,31 +1447,29 @@ async function viewAppearance() {
       </form>
     </div></div>`;
 
+  const showIcon = () => {
+    const url = iconPreview();
+    document.getElementById('icon-prev').src = url;
+    document.getElementById('pv-icon').src = url;
+    markSwatch(document.getElementById('isw'), iconMode === 'macaron' ? iconBg : null);
+  };
   const setColor = (c) => {
     s.primary_color = c;
     document.documentElement.style.setProperty('--primary', c);
-    document.querySelectorAll('#sw .swatch').forEach((x) => x.classList.toggle('on', x.dataset.c === c || (x.classList.contains('custom') && !PRESETS.some(([, p]) => p === c))));
+    markSwatch(document.getElementById('sw'), c);
   };
-  document.getElementById('sw').onclick = (e) => { const b = e.target.closest('[data-c]'); if (b) setColor(b.dataset.c); };
-  document.getElementById('custom').oninput = (e) => setColor(e.target.value);
+  const setIconBg = (c) => { iconMode = 'macaron'; iconBg = c; iconFile = null; showIcon(); };
+  document.getElementById('sw').addEventListener('click', (e) => { const b = e.target.closest('[data-c]'); if (b) setColor(b.dataset.c); });
+  document.querySelector('#sw input[type=color]').oninput = (e) => setColor(e.target.value);
+  document.getElementById('isw').addEventListener('click', (e) => { const b = e.target.closest('[data-c]'); if (b) setIconBg(b.dataset.c); });
+  document.querySelector('#isw input[type=color]').oninput = (e) => setIconBg(e.target.value);
+  document.getElementById('icon-same').onclick = () => setIconBg(s.primary_color);
   const form = document.getElementById('af');
   form.app_name.oninput = (e) => (document.getElementById('pv-name').textContent = e.target.value);
   form.tagline.oninput = (e) => (document.getElementById('pv-tag').textContent = e.target.value);
   form.whatsapp.oninput = (e) => { e.target.value = fmtPhone(e.target.value.replace(/\D/g, '').slice(0, 11)); };
-  document.getElementById('icon').onchange = (e) => {
-    iconFile = e.target.files[0];
-    if (!iconFile) return;
-    resetIcon = false;
-    const url = URL.createObjectURL(iconFile);
-    document.getElementById('icon-prev').src = url;
-    document.getElementById('pv-icon').src = url;
-  };
-  document.getElementById('icon-reset').onclick = () => {
-    iconFile = null;
-    resetIcon = true;
-    document.getElementById('icon-prev').src = 'icons/icon-512.png';
-    document.getElementById('pv-icon').src = 'icons/icon-192.png';
-  };
+  document.getElementById('icon').onchange = (e) => { if (e.target.files[0]) { iconFile = e.target.files[0]; iconMode = 'foto'; showIcon(); } };
+  document.getElementById('icon-reset').onclick = () => { iconMode = 'padrao'; iconFile = null; showIcon(); };
   cleanups.push(() => document.documentElement.style.setProperty('--primary', settings.primary_color));
 
   form.onsubmit = async (e) => {
@@ -1198,16 +1480,22 @@ async function viewAppearance() {
     try {
       const wa = form.whatsapp.value.replace(/\D/g, '');
       const patch = { primary_color: s.primary_color, app_name: form.app_name.value.trim() || 'Cozinha Doce', tagline: form.tagline.value.trim(), whatsapp: wa || null };
-      if (iconFile) {
+      if (iconMode === 'macaron') {
+        patch.icon_url = await api.uploadPhoto(await iconPng(iconBg, 512), 'app');
+        patch.icon_192_url = await api.uploadPhoto(await iconPng(iconBg, 192), 'app');
+        try { localStorage.setItem('cd-icone-fundo', iconBg); } catch {}
+      } else if (iconMode === 'foto') {
         patch.icon_url = await api.uploadPhoto(await squareIcon(iconFile, 512), 'app');
         patch.icon_192_url = await api.uploadPhoto(await squareIcon(iconFile, 192), 'app');
-      } else if (resetIcon) {
+      } else if (iconMode === 'padrao') {
         patch.icon_url = null;
         patch.icon_192_url = null;
       }
-      applySettings({ ...settings, ...(await api.saveSettings(patch)) });
+      const saved = { ...settings, ...(await api.saveSettings(patch)) };
+      applySettings(saved);
+      screenUpdate('ajustes', saved);
       toast('Aparência salva ✨');
-      render();
+      viewAppearance();
     } catch (err) {
       fail(err);
       btn.disabled = false;
@@ -1216,82 +1504,92 @@ async function viewAppearance() {
   };
 }
 
-async function viewCategories() {
+async function viewCategories(ctx) {
   if (!isAdmin()) { location.hash = '#/menu'; return; }
-  categories = await api.listCategories();
-  $view.innerHTML = `<div class="page">${pageHead('Categorias')}
-    <div class="pad stack">
-      <div class="list" style="margin:0" id="cl">${categories.map((c, i) => `
-        <div class="li" data-slug="${esc(c.slug)}">
-          <input class="input" data-k="emoji" value="${esc(c.emoji)}" style="width:56px;text-align:center;padding:8px" maxlength="4" aria-label="Emoji">
-          <input class="input grow" data-k="name" value="${esc(c.name)}" maxlength="40" aria-label="Nome">
-          <button class="icon-btn" data-mv="-1" ${i ? '' : 'disabled'} aria-label="Subir">↑</button>
-          <button class="icon-btn" data-del aria-label="Excluir" style="color:var(--danger)">✕</button>
-        </div>`).join('')}</div>
-      <form class="card row" id="nc">
-        <input class="input" name="emoji" placeholder="🍰" style="width:64px;text-align:center" maxlength="4">
-        <input class="input grow" name="name" placeholder="Nova categoria" maxlength="40" required>
-        <button class="btn sm">Adicionar</button>
-      </form>
-      <p class="small muted">Os doces de uma categoria excluída ficam sem categoria (continuam publicados).</p>
-    </div></div>`;
-  const list = document.getElementById('cl');
-  list.addEventListener('change', async (e) => {
-    const row = e.target.closest('[data-slug]');
-    const k = e.target.dataset.k;
-    if (!row || !k) return;
-    const c = categories.find((x) => x.slug === row.dataset.slug);
-    c[k] = e.target.value.trim() || c[k];
-    try { await api.saveCategory(c); toast('Categoria salva ✓'); } catch (err) { fail(err); }
-  });
-  list.addEventListener('click', async (e) => {
-    const row = e.target.closest('[data-slug]');
-    if (!row) return;
-    const i = categories.findIndex((x) => x.slug === row.dataset.slug);
-    try {
-      if (e.target.closest('[data-mv]') && i > 0) {
-        [categories[i - 1], categories[i]] = [categories[i], categories[i - 1]];
-        await Promise.all(categories.map((c, pos) => ((c.position = pos), api.saveCategory(c))));
-        viewCategories();
-      } else if (e.target.closest('[data-del]')) {
-        if (!(await confirmSheet(`Excluir "${categories[i].name}"?`, 'Os doces dela ficam sem categoria.', 'Excluir', true))) return;
-        await api.deleteCategory(categories[i].slug);
-        viewCategories();
-      }
-    } catch (err) { fail(err); }
-  });
-  document.getElementById('nc').onsubmit = async (e) => {
-    e.preventDefault();
-    const f = e.target;
-    let slug = slugify(f.name.value) || 'categoria';
-    while (categories.some((c) => c.slug === slug)) slug = (slug + '_2').slice(-30);
-    try {
-      await api.saveCategory({ slug, name: f.name.value.trim(), emoji: f.emoji.value.trim() || '🍬', position: categories.length });
-      toast('Categoria criada ✓');
-      viewCategories();
-    } catch (err) { fail(err); }
+  const reload = async () => {
+    categories = await screenFetch('cats', () => api.listCategories());
+    drawCategories(ctx);
   };
+  const drawCategories = () => {
+    $view.innerHTML = `<div class="page">${pageHead('Categorias')}
+      <div class="pad stack">
+        <div class="list" style="margin:0" id="cl">${categories.map((c, i) => `
+          <div class="li" data-slug="${esc(c.slug)}">
+            <input class="input" data-k="emoji" value="${esc(c.emoji)}" style="width:56px;text-align:center;padding:8px" maxlength="4" aria-label="Emoji">
+            <input class="input grow" data-k="name" value="${esc(c.name)}" maxlength="40" aria-label="Nome">
+            <button class="icon-btn" data-mv="-1" ${i ? '' : 'disabled'} aria-label="Subir">↑</button>
+            <button class="icon-btn" data-del aria-label="Excluir" style="color:var(--danger)">✕</button>
+          </div>`).join('')}</div>
+        <form class="card row" id="nc">
+          <input class="input" name="emoji" placeholder="🍰" style="width:64px;text-align:center" maxlength="4">
+          <input class="input grow" name="name" placeholder="Nova categoria" maxlength="40" required>
+          <button class="btn sm">Adicionar</button>
+        </form>
+        <p class="small muted">Os doces de uma categoria excluída ficam sem categoria (continuam publicados).</p>
+      </div></div>`;
+    const list = document.getElementById('cl');
+    list.addEventListener('change', async (e) => {
+      const row = e.target.closest('[data-slug]');
+      const k = e.target.dataset.k;
+      if (!row || !k) return;
+      const c = categories.find((x) => x.slug === row.dataset.slug);
+      c[k] = e.target.value.trim() || c[k];
+      screenUpdate('cats', categories);
+      try { await api.saveCategory(c); toast('Categoria salva ✓'); } catch (err) { fail(err); }
+    });
+    list.addEventListener('click', async (e) => {
+      const row = e.target.closest('[data-slug]');
+      if (!row) return;
+      const i = categories.findIndex((x) => x.slug === row.dataset.slug);
+      try {
+        if (e.target.closest('[data-mv]') && i > 0) {
+          [categories[i - 1], categories[i]] = [categories[i], categories[i - 1]];
+          categories.forEach((c, pos) => (c.position = pos));
+          screenUpdate('cats', categories);
+          drawCategories();
+          await Promise.all(categories.map((c) => api.saveCategory(c)));
+        } else if (e.target.closest('[data-del]')) {
+          if (!(await confirmSheet(`Excluir "${categories[i].name}"?`, 'Os doces dela ficam sem categoria.', 'Excluir', true))) return;
+          await api.deleteCategory(categories[i].slug);
+          await reload();
+        }
+      } catch (err) { fail(err); }
+    });
+    document.getElementById('nc').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      let slug = slugify(f.name.value) || 'categoria';
+      while (categories.some((c) => c.slug === slug)) slug = (slug + '_2').slice(-30);
+      try {
+        await api.saveCategory({ slug, name: f.name.value.trim(), emoji: f.emoji.value.trim() || '🍬', position: categories.length });
+        toast('Categoria criada ✓');
+        await reload();
+      } catch (err) { fail(err); }
+    };
+  };
+  await screenShow(ctx, 'cats', () => api.listCategories(), (cats) => { categories = cats; drawCategories(); }, { guard: true });
 }
 
-async function viewNewsletter() {
+async function viewNewsletter(ctx) {
   if (!isAdmin()) { location.hash = '#/menu'; return; }
-  const list = await api.newsletterList();
-  $view.innerHTML = `<div class="page">${pageHead('Novidades por e-mail')}
-    <div class="pad stack">
-      <div class="card row between"><div><b style="font-size:26px;font-family:var(--font-display)">${list.length}</b><div class="small muted">${list.length === 1 ? 'pessoa aceitou' : 'pessoas aceitaram'} receber novidades</div></div>
-        <div class="stack" style="gap:8px"><button class="btn sm" id="copy" ${list.length ? '' : 'disabled'}>Copiar e-mails</button><button class="btn sm ghost" id="csv" ${list.length ? '' : 'disabled'}>Baixar planilha</button></div></div>
-      <p class="small muted" style="margin:0">Cole os e-mails no campo "Cco" (cópia oculta) ou importe a planilha no seu serviço de e-mail marketing. Respeite quem pedir para sair.</p>
-      ${list.length ? `<div class="list" style="margin:0">${list.map((p) => `<div class="li" style="font-weight:600"><span class="li-ico">📧</span><span class="grow"><b>${esc(p.name || '—')}</b><div class="small muted">${esc(p.email)}${p.region ? ' · ' + esc(p.region) : ''}</div>
-        <div class="small muted">${(p.categories || []).map((s) => catOf(s)?.emoji || '').join(' ')}</div></span></div>`).join('')}</div>` : emptyBox('📭', 'Ninguém ainda', 'Quem marcar "Novidades por e-mail" no perfil aparece aqui.')}
-    </div></div>`;
-  document.getElementById('copy').onclick = async () => { await navigator.clipboard.writeText(list.map((p) => p.email).join(', ')); toast('E-mails copiados ✓'); };
-  document.getElementById('csv').onclick = () => {
-    const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const rows = [['Nome', 'E-mail', 'Região', 'Categorias'], ...list.map((p) => [p.name, p.email, p.region, (p.categories || []).map((s) => catOf(s)?.name || s).join(', ')])];
-    const blob = new Blob(['﻿' + rows.map((r) => r.map(q).join(';')).join('\n')], { type: 'text/csv' });
-    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'novidades-cozinha-doce.csv' });
-    a.click();
-  };
+  $view.innerHTML = `<div class="page">${pageHead('Novidades por e-mail')}<div class="pad">${skeletonGrid(2)}</div></div>`;
+  await screenShow(ctx, 'novidades', () => api.newsletterList(), (list) => {
+    $view.innerHTML = `<div class="page">${pageHead('Novidades por e-mail')}
+      <div class="pad stack">
+        <div class="card row between"><div><b style="font-size:26px;font-family:var(--font-display)">${list.length}</b><div class="small muted">${list.length === 1 ? 'pessoa aceitou' : 'pessoas aceitaram'} receber novidades</div></div>
+          <div class="stack" style="gap:8px"><button class="btn sm" id="copy" ${list.length ? '' : 'disabled'}>Copiar e-mails</button><button class="btn sm ghost" id="csv" ${list.length ? '' : 'disabled'}>Baixar planilha</button></div></div>
+        <p class="small muted" style="margin:0">Cole os e-mails no campo "Cco" (cópia oculta) ou importe a planilha no seu serviço de e-mail marketing. Respeite quem pedir para sair.</p>
+        ${list.length ? `<div class="list" style="margin:0">${list.map((p) => `<div class="li" style="font-weight:600"><span class="li-ico">📧</span><span class="grow"><b>${esc(p.name || '—')}</b><div class="small muted">${esc(p.email)}${p.region ? ' · ' + esc(p.region) : ''}</div>
+          <div class="small muted">${(p.categories || []).map((s) => catOf(s)?.emoji || '').join(' ')}</div></span></div>`).join('')}</div>` : emptyBox('📭', 'Ninguém ainda', 'Quem marcar "Novidades por e-mail" no perfil aparece aqui.')}
+      </div></div>`;
+    document.getElementById('copy').onclick = async () => { await navigator.clipboard.writeText(list.map((p) => p.email).join(', ')); toast('E-mails copiados ✓'); };
+    document.getElementById('csv').onclick = () => {
+      const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const rows = [['Nome', 'E-mail', 'Região', 'Categorias'], ...list.map((p) => [p.name, p.email, p.region, (p.categories || []).map((s) => catOf(s)?.name || s).join(', ')])];
+      const blob = new Blob(['﻿' + rows.map((r) => r.map(q).join(';')).join('\n')], { type: 'text/csv' });
+      Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'novidades-cozinha-doce.csv' }).click();
+    };
+  });
 }
 
 // ===================================================================
@@ -1336,6 +1634,8 @@ const ROUTES = [
 let renderSeq = 0;
 async function render() {
   const my = ++renderSeq;
+  const ctx = { alive: () => my === renderSeq, touched: false };
+  currentCtx = ctx;
   cleanups.forEach((fn) => { try { fn(); } catch {} });
   cleanups = [];
   document.querySelectorAll('.sheet-backdrop').forEach((b) => b.remove());
@@ -1348,23 +1648,33 @@ async function render() {
   $tabbar.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === route[2]));
   window.scrollTo(0, 0);
   try {
-    await route[1](params, query);
+    await route[1](ctx, params, query);
   } catch (err) {
-    if (my !== renderSeq) return;
+    if (!ctx.alive()) return;
     console.error(err);
     $view.innerHTML = emptyBox('😵', 'Não deu para carregar', esc(err.message || 'Confira sua internet e tente de novo.'), '<button class="btn" onclick="location.reload()">Tentar de novo</button>');
   }
 }
 window.addEventListener('hashchange', () => { sessionStorage.setItem('cd-nav', '1'); render(); });
+// Redesenha a tela atual com dados novos que chegaram (aparência, categorias, conta) sem atrapalhar quem digita.
+function rerenderQuietly() {
+  if (currentCtx.touched) return;
+  const typing = document.activeElement;
+  if ($view.contains(typing) && /^(INPUT|TEXTAREA|SELECT)$/.test(typing.tagName)) return;
+  render();
+}
 
 // ===================================================================
 // Início do app
 // ===================================================================
-async function loadUserData() {
-  favIds = new Set(user() ? await api.listFavoriteIds().catch(() => []) : []);
+function loadUserData() {
+  favIds = new Set(user() ? screenCached('favs') || [] : []);
+  paintHearts();
   startRealtime();
   refreshUnread();
-  if (user()) syncPush(api);
+  if (!user()) return;
+  syncPush(api);
+  screenFetch('favs', () => api.listFavoriteIds()).then((ids) => { favIds = new Set(ids); paintHearts(); }).catch(() => {});
 }
 
 async function boot() {
@@ -1373,16 +1683,29 @@ async function boot() {
   await api.init();
   // Volta do login do Google: tira o ?code= do endereço.
   if (location.search) history.replaceState(null, '', location.pathname + location.hash);
-  const [s, cats] = await Promise.all([api.getSettings(), api.listCategories()]);
-  applySettings(s);
-  categories = cats;
-  await loadUserData();
+  // Aparência e categorias: na hora com o guardado; o banco confere em seguida.
+  const cachedSettings = screenCached('ajustes');
+  const firstTime = { app_name: 'Cozinha Doce', tagline: '', icon_url: null, icon_192_url: null, whatsapp: null,
+    primary_color: getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#7b4a2e' };
+  applySettings({ ...firstTime, ...(cachedSettings || {}) });
+  categories = screenCached('cats') || [];
+  loadUserData();
   api.onAuth(async (u) => {
-    await loadUserData();
-    if (u) toast(`Bem-vindo(a), ${firstName(u.name)}! 🍰`);
+    loadUserData();
+    if (u) { toast(`Bem-vindo(a), ${firstName(u.name)}! 🍰`); prefetchScreens(); }
     render();
   });
+  api.onAdminChange(() => rerenderQuietly());
   render();
+
+  const [s, cats] = await Promise.all([
+    screenFetch('ajustes', () => api.getSettings()).catch(() => null),
+    screenFetch('cats', () => api.listCategories()).catch(() => null),
+  ]);
+  const changed = (s && !sameJson(s, cachedSettings)) || (cats && !sameJson(cats, categories));
+  if (s) applySettings(s);
+  if (cats) categories = cats;
+  if (changed) rerenderQuietly();
 }
 
 window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; });

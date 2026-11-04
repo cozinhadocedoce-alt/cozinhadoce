@@ -33,11 +33,21 @@ function supabaseApi(sb) {
     if (error) throw new Error(error.message);
     return data;
   };
+  // "É administrador?" abre na hora com a última resposta guardada neste aparelho; o banco confere
+  // em segundo plano (as permissões de verdade estão nas regras do banco, não aqui).
+  const adminKey = (id) => `cd-admin:${id}`;
+  const adminChanged = new Set();
+  const cachedAdmin = () => {
+    try { return !!user && localStorage.getItem(adminKey(user.id)) === '1'; } catch { return false; }
+  };
   const refreshAdmin = async () => {
-    admin = false;
-    if (!user) return;
-    const { data } = await sb.from('admins').select('user_id').eq('user_id', user.id).maybeSingle();
-    admin = !!data;
+    if (!user) { admin = false; return; }
+    const id = user.id;
+    const { data, error } = await sb.from('admins').select('user_id').eq('user_id', id).maybeSingle();
+    if (error || user?.id !== id) return;
+    const next = !!data;
+    try { localStorage.setItem(adminKey(id), next ? '1' : '0'); } catch {}
+    if (next !== admin) { admin = next; adminChanged.forEach((cb) => cb(admin)); }
   };
   const pathFromUrl = (url) => {
     const i = String(url).indexOf('/object/public/fotos/');
@@ -49,18 +59,21 @@ function supabaseApi(sb) {
     async init() {
       const { data } = await sb.auth.getSession();
       user = toUser(data.session?.user);
-      await refreshAdmin();
+      admin = cachedAdmin();
+      refreshAdmin().catch(() => {});
       sb.auth.onAuthStateChange(async (event, session) => {
         const next = toUser(session?.user);
         if ((next?.id ?? null) === (user?.id ?? null) && event !== 'USER_UPDATED') return;
         user = next;
-        await refreshAdmin();
+        admin = cachedAdmin();
+        await refreshAdmin().catch(() => {});
         listeners.forEach((cb) => cb(user));
       });
     },
     get user() { return user; },
     get isAdmin() { return admin; },
     onAuth(cb) { listeners.add(cb); },
+    onAdminChange(cb) { adminChanged.add(cb); },
     async signIn() {
       const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: BASE_URL } });
       if (error) throw error;
@@ -281,6 +294,7 @@ function demoApi() {
     get user() { return db.user; },
     get isAdmin() { return !!db.user; }, // na demonstração, quem entra administra
     onAuth(cb) { listeners.add(cb); },
+    onAdminChange() {},
     async signIn() {
       db.user = { id: 'demo-user', email: 'voce@exemplo.com', name: 'Você', avatar: null };
       db.profile ||= { id: 'demo-user', name: 'Você', email: 'voce@exemplo.com', avatar_url: null, whatsapp: null, region: '', categories: [], email_news: false, push_news: false };
