@@ -341,7 +341,7 @@ document.addEventListener('input', () => { currentCtx.touched = true; }, true);
 // O Início pronto fica guardado (fora da tela) enquanto a pessoa vê um doce: ao voltar, ele é
 // recolocado como estava, sem desenhar os ~100 cartões de novo.
 let homeDom = null;
-const homeSig = () => [user()?.id, isAdmin(), settings.updated_at, settings.app_name, settings.tagline, settings.icon_url, categories.length].join('|');
+const homeSig = () => [user()?.id, isAdmin(), settings.updated_at, settings.app_name, settings.tagline, settings.icon_url, JSON.stringify(categories)].join('|');
 
 async function viewHome(ctx) {
   const cached = screenCached('inicio');
