@@ -1242,6 +1242,48 @@ async function viewChats(ctx) {
   await screenShow(ctx, 'chat', loadChats, draw);
 }
 
+// Conversa presa na tela (iPhone): o Safari não encolhe a página quando o teclado abre e
+// empurra tudo para cima. A conversa ocupa só a área visível, o cabeçalho fica em cima, a
+// caixa de escrever fica logo acima do teclado e só as mensagens rolam.
+function pinChatToScreen() {
+  const root = document.documentElement;
+  const vv = window.visualViewport;
+  root.classList.add('chat-open');
+  const fit = () => {
+    const page = document.querySelector('.chat-page');
+    if (!page || !vv) return;
+    const $msgs = document.getElementById('msgs');
+    const atEnd = $msgs && $msgs.scrollHeight - $msgs.scrollTop - $msgs.clientHeight < 40;
+    page.style.setProperty('--chat-h', `${Math.round(vv.height)}px`);
+    page.style.setProperty('--chat-y', `${Math.round(vv.offsetTop)}px`);
+    if (atEnd) $msgs.scrollTop = $msgs.scrollHeight;
+  };
+  // Arrastar fora da lista de mensagens não rola a página por trás (o "elástico" do iPhone).
+  const stopDrag = (e) => {
+    if (!e.target.closest?.('.chat-page')) return;
+    if (e.target.closest('#msgs, textarea, .quick')) return;
+    e.preventDefault();
+  };
+  const raf = () => requestAnimationFrame(fit);
+  vv?.addEventListener('resize', raf);
+  vv?.addEventListener('scroll', raf);
+  document.addEventListener('touchmove', stopDrag, { passive: false });
+  // Ao tocar na caixa, o iPhone rola a página; volta para o topo e reencaixa.
+  const onFocus = (e) => { if (e.target.id === 'text') setTimeout(() => { window.scrollTo(0, 0); fit(); }, 50); };
+  document.addEventListener('focusin', onFocus);
+  const obs = new MutationObserver(raf);
+  obs.observe($view, { childList: true });
+  raf();
+  cleanups.push(() => {
+    root.classList.remove('chat-open');
+    vv?.removeEventListener('resize', raf);
+    vv?.removeEventListener('scroll', raf);
+    document.removeEventListener('touchmove', stopDrag);
+    document.removeEventListener('focusin', onFocus);
+    obs.disconnect();
+  });
+}
+
 async function viewChat(ctx, [id]) {
   if (!user()) { $view.innerHTML = loginGate('💬', 'Entre para ver a conversa', ''); return; }
   const me = user().id;
@@ -1364,6 +1406,7 @@ async function viewChat(ctx, [id]) {
   };
   chatHandlers.add(h);
   cleanups.push(() => chatHandlers.delete(h));
+  pinChatToScreen();
 
   if (st?.c) drawPage();
   const fresh = await loadAll().catch((err) => { if (st?.c) return null; throw err; });

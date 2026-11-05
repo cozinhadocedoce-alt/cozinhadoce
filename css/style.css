@@ -368,9 +368,16 @@ textarea.input { resize: vertical; min-height: 92px; }
 .conv-time { font-size: 12px; color: var(--muted); align-self: flex-start; margin-top: 4px; }
 .unread-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--primary); }
 
-.chat-page { display: flex; flex-direction: column; height: 100dvh; }
-.chat-page .page-head { position: relative; }
-.chat-scroll { flex: 1; overflow-y: auto; overscroll-behavior-y: contain; padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
+/* Conversa presa na tela: cabeçalho em cima e caixa de escrever embaixo, só as mensagens rolam.
+   No iPhone o teclado não encolhe a página; o app ajusta --chat-h/--chat-y pela área visível (visualViewport). */
+html.chat-open, html.chat-open body { overflow: hidden; overscroll-behavior: none; }
+.chat-page {
+  position: fixed; z-index: 25; top: 0; left: 0; right: 0; max-width: 560px; margin: 0 auto;
+  height: var(--chat-h, 100dvh); transform: translateY(var(--chat-y, 0px));
+  display: flex; flex-direction: column; background: var(--bg);
+}
+.chat-page .page-head, .chat-page .quick, .chat-page .chat-input { position: relative; flex: none; }
+.chat-scroll { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
 .chat-about { align-self: center; width: min(100%, 300px); background: var(--surface); border-radius: 22px; overflow: hidden; box-shadow: var(--shadow-sm); border: 1px solid var(--line); margin: 6px 0 14px; }
 .chat-about img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
 .chat-about div { padding: 10px 12px; font-size: 14px; }
