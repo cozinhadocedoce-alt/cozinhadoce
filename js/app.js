@@ -1776,7 +1776,7 @@ async function viewNewsletter(ctx) {
       <div class="pad stack">
         <div class="card row between"><div><b style="font-size:26px;font-family:var(--font-display)">${list.length}</b><div class="small muted">${list.length === 1 ? 'pessoa aceitou' : 'pessoas aceitaram'} receber novidades</div></div>
           <div class="stack" style="gap:8px"><button class="btn sm" id="copy" ${list.length ? '' : 'disabled'}>Copiar e-mails</button><button class="btn sm ghost" id="csv" ${list.length ? '' : 'disabled'}>Baixar planilha</button></div></div>
-        <p class="small muted" style="margin:0">Cole os e-mails no campo "Cco" (cópia oculta) ou importe a planilha no seu serviço de e-mail marketing. Respeite quem pedir para sair.</p>
+        <p class="small muted" style="margin:0">Quando você publica um doce, quem está aqui recebe um e-mail da Cozinha Doce em até uns 15 minutos (só das categorias que escolheu). Cada e-mail tem um link para sair da lista.</p>
         ${list.length ? `<div class="list" style="margin:0">${list.map((p) => `<div class="li" style="font-weight:600"><span class="li-ico">📧</span><span class="grow"><b>${esc(p.name || '—')}</b><div class="small muted">${esc(p.email)}${p.region ? ' · ' + esc(p.region) : ''}</div>
           <div class="small muted">${(p.categories || []).map((s) => catOf(s)?.emoji || '').join(' ')}</div></span></div>`).join('')}</div>` : emptyBox('📭', 'Ninguém ainda', 'Quem marcar "Novidades por e-mail" no perfil aparece aqui.')}
       </div></div>`;

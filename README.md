@@ -54,6 +54,12 @@ for f in preencher-doce enviar-push manifesto; do npx supabase functions deploy 
   ```
 - Modelo da IA: padrão `gemini-3.5-flash-lite` (o mesmo do Desapega). Para trocar: segredo `GEMINI_MODEL`. Limite: 200 fotos por hora.
 
+### 2b. Novidades por e-mail (Gmail)
+1. Rode [`supabase/003_novidades_email.sql`](supabase/003_novidades_email.sql) no SQL Editor.
+2. Guarde uma senha longa qualquer no Vault: `select vault.create_secret('SENHA-LONGA', 'news_email_secret');`
+3. Na conta Google que envia (cozinhadoce.doce@gmail.com), com a verificação em duas etapas ligada, crie uma **senha de app** em [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
+4. No GitHub, **Settings → Secrets and variables → Actions**, crie `NEWS_EMAIL_SECRET` (a mesma senha do Vault) e `GMAIL_APP_PASSWORD` (a senha de app).
+
 ### 3. Publicar (GitHub Pages)
 ```bash
 git init -b main && git add . && git commit -m "Cozinha Doce"
@@ -66,7 +72,7 @@ No GitHub: **Settings → Pages → Deploy from a branch → main / (root)**.
 - **Ícone:** o administrador envia uma imagem; o app recorta um quadrado de 512 e 192 px e usa no topo, na aba do navegador, no iPhone e no manifesto dinâmico (função `manifesto`). Quem já instalou pode precisar reinstalar para ver o ícone novo.
 - **Publicar só completo:** o banco recusa doce publicado sem título, valor e foto (constraint `publicado_completo`).
 - **Notificações:** mensagem nova avisa a outra pessoa da conversa; doce publicado avisa quem ligou "Avisar doce novo" (filtrando pelas categorias preferidas). No iPhone, só com o app instalado na tela de início.
-- **Novidades por e-mail:** o app guarda quem aceitou; a lista (copiar ou baixar planilha) fica em **Menu → Quem quer novidades por e-mail**, para usar no seu serviço de e-mail.
+- **Novidades por e-mail:** quando um doce é publicado, o agendamento "Enviar novidades por e-mail" do GitHub (a cada 10 min, `scripts/enviar-novidades.mjs`) manda pelo Gmail da loja um e-mail para quem marcou essa opção, filtrando pelas categorias preferidas. Vários doces publicados juntos vão num e-mail só, cada doce vai uma vez só e o rodapé tem o link para sair da lista (`sair.html`). A lista também fica em **Menu → Quem quer novidades por e-mail**.
 - **Ícones PNG:** gerados de `icons/icon.svg` com `npm install && npm run icons`.
 
 ## Estrutura
