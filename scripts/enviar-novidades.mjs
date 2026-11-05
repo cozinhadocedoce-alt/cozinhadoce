@@ -31,7 +31,10 @@ export function buildEmail({ app, person, products }) {
   const hello = esc(helloText);
   const intro = products.length === 1 ? 'Acabou de sair um doce novo:' : 'Acabaram de sair doces novos:';
 
-  const cards = products.map((p) => {
+  const MAX = 12; // muitos doces de uma vez: mostra os 12 mais recentes e um link para o resto
+  const extra = Math.max(0, products.length - MAX);
+  const shown = products.slice(-MAX).reverse();
+  const cards = shown.map((p) => {
     const link = `${SITE}d/${p.id}/`;
     const cat = p.category_name ? `${esc(p.category_emoji || '')} ${esc(p.category_name)}`.trim() : '';
     const desc = String(p.description || '').replace(/\s+/g, ' ').trim();
@@ -62,6 +65,7 @@ export function buildEmail({ app, person, products }) {
       </td></tr>
       <tr><td style="padding:0 0 16px;font-size:16px;color:#2b2226">${hello} ${intro}</td></tr>
       ${cards}
+      ${extra ? `<tr><td style="padding:0 0 20px;text-align:center"><a href="${esc(SITE)}" style="display:inline-block;color:${color};font-weight:700;font-size:15px;text-decoration:none">E mais ${extra} ${extra === 1 ? 'doce novo' : 'doces novos'} no app →</a></td></tr>` : ''}
       <tr><td style="padding:4px 8px 0;text-align:center;font-size:12px;line-height:1.6;color:#8a7a82">
         Você recebe este e-mail porque marcou “Novidades por e-mail” no seu perfil da ${esc(name)}.<br>
         <a href="${esc(unsub)}" style="color:#8a7a82">Não quero mais receber</a>
@@ -72,7 +76,8 @@ export function buildEmail({ app, person, products }) {
 
   const text = [
     `${helloText} ${intro}`, '',
-    ...products.map((p) => `${p.title} · ${money(p.price)}\n${SITE}d/${p.id}/\n`),
+    ...shown.map((p) => `${p.title} · ${money(p.price)}\n${SITE}d/${p.id}/\n`),
+    ...(extra ? [`E mais ${extra} no app: ${SITE}`, ''] : []),
     `Não quer mais receber? ${unsub}`,
   ].join('\n');
 
