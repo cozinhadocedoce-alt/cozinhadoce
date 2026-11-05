@@ -1,6 +1,6 @@
 // Service worker: abre rápido, funciona com internet ruim e mostra as notificações.
 // Arquivos do app: rede primeiro, cache como reserva. Dados do Supabase: sempre da rede.
-const CACHE = 'cozinha-doce-v12';
+const CACHE = 'cozinha-doce-v13';
 const SHELL = [
   './',
   'index.html',
@@ -85,8 +85,9 @@ self.addEventListener('push', (e) => {
       if (msg.url && wins.some((w) => w.focused && w.visibilityState === 'visible' && w.url === msg.url)) return;
       return self.registration.showNotification(msg.title || 'Cozinha Doce', {
         body: msg.body || 'Tem novidade docinha para você.',
-        // No Android o ícone da esquerda é o badge; o icon aparecia repetido do lado direito.
-        icon: /Android/i.test(navigator.userAgent) ? undefined : 'icons/icon-192.png',
+        // No Android o ícone da esquerda é o badge; o icon aparece do lado direito (sem ele o Chrome põe
+        // a letra do site), então lá vai uma imagem transparente para o espaço ficar vazio.
+        icon: /Android/i.test(navigator.userAgent) ? 'icons/vazio.png' : 'icons/icon-192.png',
         badge: 'icons/badge-96.png',
         image: msg.image || undefined,
         tag: msg.tag,
