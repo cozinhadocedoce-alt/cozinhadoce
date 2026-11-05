@@ -131,7 +131,6 @@ create policy "doces: publicados para todos" on public.products for select using
 drop policy if exists "doces: admin altera" on public.products;
 create policy "doces: admin altera" on public.products for all using (public.is_admin()) with check (public.is_admin());
 
-alter table public.products add column if not exists news_emailed_at timestamptz; -- e-mail de novidade já enviado
 create or replace function public.products_before_save()
 returns trigger language plpgsql as $$
 begin
@@ -139,7 +138,6 @@ begin
   if new.status = 'published' and (tg_op = 'INSERT' or old.status <> 'published') then
     new.published_at := now();
     new.ai_fields := '{}';
-    new.news_emailed_at := null; -- (re)publicado: entra na fila do e-mail, igual ao aviso no celular
   end if;
   return new;
 end $$;
