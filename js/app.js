@@ -1264,6 +1264,7 @@ function pinChatToScreen() {
     if (e.target.closest('#msgs, textarea, .quick')) return;
     e.preventDefault();
   };
+  const elastic = chatElastic();
   const raf = () => requestAnimationFrame(fit);
   vv?.addEventListener('resize', raf);
   vv?.addEventListener('scroll', raf);
@@ -1281,7 +1282,67 @@ function pinChatToScreen() {
     document.removeEventListener('touchmove', stopDrag);
     document.removeEventListener('focusin', onFocus);
     obs.disconnect();
+    elastic();
   });
+}
+
+// Android: puxar a conversa além da primeira/última mensagem estica e volta como elástico,
+// igual ao iPhone (que já faz isso sozinho). Devolve a função que desliga.
+function chatElastic() {
+  const ios = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (ios || !matchMedia('(pointer: coarse)').matches) return () => {};
+  const root = document.documentElement;
+  root.classList.add('elastic');
+  let box = null, startY = 0, lastY = 0, from = 0, pull = 0;
+  const set = (y) => { box.style.transform = y ? `translateY(${y}px)` : ''; };
+  // Resistência que aumenta quanto mais puxa (mesma curva do iPhone).
+  const resist = (d) => { const max = box.clientHeight; return Math.sign(d) * max * (1 - 1 / (Math.abs(d) * 0.55 / max + 1)); };
+  const onStart = (e) => {
+    box = e.target.closest?.('#msgs');
+    if (!box || e.touches.length > 1) { box = null; return; }
+    box.classList.remove('spring');
+    startY = lastY = e.touches[0].clientY;
+    from = null;
+    pull = 0;
+  };
+  const onMove = (e) => {
+    if (!box) return;
+    const y = e.touches[0].clientY;
+    const down = y > lastY;
+    lastY = y;
+    const top = box.scrollTop <= 0;
+    const end = box.scrollTop + box.clientHeight >= box.scrollHeight - 1;
+    if (from == null) {
+      // Começa a esticar quando chega na borda puxando para fora dela.
+      if ((top && down) || (end && !down && y !== startY)) from = y; else return;
+    }
+    const d = y - from;
+    if ((top && d >= 0) || (end && d <= 0)) {
+      if (e.cancelable) e.preventDefault();
+      pull = resist(d);
+      set(pull);
+    } else {
+      from = null;
+      if (pull) { pull = 0; set(0); }
+    }
+  };
+  const onEnd = () => {
+    if (!box) return;
+    if (pull) { box.classList.add('spring'); set(0); }
+    box = null;
+    pull = 0;
+  };
+  document.addEventListener('touchstart', onStart, { passive: true });
+  document.addEventListener('touchmove', onMove, { passive: false });
+  document.addEventListener('touchend', onEnd);
+  document.addEventListener('touchcancel', onEnd);
+  return () => {
+    root.classList.remove('elastic');
+    document.removeEventListener('touchstart', onStart);
+    document.removeEventListener('touchmove', onMove);
+    document.removeEventListener('touchend', onEnd);
+    document.removeEventListener('touchcancel', onEnd);
+  };
 }
 
 async function viewChat(ctx, [id]) {

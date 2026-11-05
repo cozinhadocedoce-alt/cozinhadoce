@@ -377,6 +377,11 @@ html.chat-open, html.chat-open body { overflow: hidden; overscroll-behavior: non
   display: flex; flex-direction: column; background: var(--bg);
 }
 .chat-page .page-head, .chat-page .quick, .chat-page .chat-input { position: relative; flex: none; }
+.chat-page { overflow: hidden; }
+.chat-page .quick, .chat-page .chat-input { z-index: 2; }
+/* Android: efeito elástico feito pelo app (igual ao do iPhone), sem o "esticar" do Chrome. */
+html.elastic .chat-scroll { overscroll-behavior-y: none; }
+.chat-scroll.spring { transition: transform .5s cubic-bezier(.2, .9, .3, 1); }
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
 .chat-about { align-self: center; width: min(100%, 300px); background: var(--surface); border-radius: 22px; overflow: hidden; box-shadow: var(--shadow-sm); border: 1px solid var(--line); margin: 6px 0 14px; }
 .chat-about img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
