@@ -1089,12 +1089,22 @@ function mountEditor(root, list, mode) {
 // ===================================================================
 // Chat
 // ===================================================================
+// Até onde a pessoa já viu cada conversa neste aparelho (hora da última mensagem que estava na
+// tela). Vale mesmo se uma busca antiga da lista chegar depois e ainda disser "não lida".
+const seenHere = new Map();
 const isUnread = (c) => {
   const u = user();
   if (!u || !c.last_sender || c.last_sender === u.id) return false;
   const seen = isAdmin() && c.customer_id !== u.id ? c.admin_read_at : c.customer_read_at;
-  return new Date(c.last_message_at) > new Date(seen);
+  const last = new Date(c.last_message_at);
+  return last > new Date(seen) && !(seenHere.has(c.id) && last <= new Date(seenHere.get(c.id)));
 };
+// Marca a conversa como lida: tira o número na hora, avisa o banco e confere a lista depois.
+function markSeen(id, upTo) {
+  if (upTo && !(seenHere.has(id) && new Date(seenHere.get(id)) >= new Date(upTo))) seenHere.set(id, upTo);
+  paintUnread(screenCached('chat'));
+  api.markRead(id).then(refreshUnread, () => {});
+}
 function paintUnread(list) {
   unreadCount = user() ? (list || []).filter(isUnread).length : 0;
   $badge.hidden = !unreadCount;
@@ -1463,12 +1473,14 @@ async function viewChat(ctx, [id]) {
     msgs.push(m);
     remember();
     drawMsgs();
-    api.markRead(id).then(refreshUnread);
+    markSeen(id, m.created_at);
   };
   chatHandlers.add(h);
   cleanups.push(() => chatHandlers.delete(h));
   pinChatToScreen();
 
+  // Abriu a conversa: o número de não lidas some na hora (não espera responder nem o banco).
+  markSeen(id, st?.c?.last_message_at);
   if (st?.c) drawPage();
   const fresh = await loadAll().catch((err) => { if (st?.c) return null; throw err; });
   if (!ctx.alive()) return;
@@ -1483,7 +1495,7 @@ async function viewChat(ctx, [id]) {
     remember();
     if (!pageDrawn) drawPage(); else if (changed) drawMsgs();
   }
-  api.markRead(id).then(refreshUnread);
+  markSeen(id, [st?.c?.last_message_at, msgs?.at(-1)?.created_at].filter(Boolean).sort().at(-1));
 }
 
 function startRealtime() {
