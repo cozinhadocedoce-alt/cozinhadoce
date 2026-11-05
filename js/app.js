@@ -341,7 +341,7 @@ document.addEventListener('input', () => { currentCtx.touched = true; }, true);
 // O Início pronto fica guardado (fora da tela) enquanto a pessoa vê um doce: ao voltar, ele é
 // recolocado como estava, sem desenhar os ~100 cartões de novo.
 let homeDom = null;
-const homeSig = () => [user()?.id, isAdmin(), settings.updated_at, settings.app_name, settings.tagline, settings.icon_url, JSON.stringify(categories)].join('|');
+const homeSig = () => [user()?.id, isAdmin(), settings.updated_at, settings.app_name, settings.tagline, settings.icon_url, settings.greet_hello, settings.greet_text, JSON.stringify(categories)].join('|');
 
 async function viewHome(ctx) {
   const cached = screenCached('inicio');
@@ -356,6 +356,16 @@ async function viewHome(ctx) {
     await screenShow(ctx, 'inicio', loadHome, drawHome);
   }
   prefetchScreens();
+}
+
+// Saudação do Início (o administrador muda em Aparência). *palavra* fica na cor do app.
+const GREET_HELLO = 'Olá';
+const GREET_TEXT = 'O que vai *adoçar* seu dia?';
+function greetHtml(s, u) {
+  const hello = (s.greet_hello || '').trim() || GREET_HELLO;
+  const text = (s.greet_text || '').trim() || GREET_TEXT;
+  const marked = esc(text).replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/\*/g, '');
+  return `${esc(hello)}${u ? `, ${esc(firstName(u.name))}` : ''}! 👋<br>${marked}`;
 }
 
 let stopHero = null;
@@ -375,7 +385,7 @@ function drawHome(all) {
       <a href="#/menu" aria-label="Menu">${u?.avatar ? `<img class="avatar" src="${esc(u.avatar)}" alt="" referrerpolicy="no-referrer">` : `<span class="avatar">${u ? initials(u.name) : '👤'}</span>`}</a>
     </header>
     ${configured ? '' : '<div class="demo-banner">🧪 <b>Modo demonstração.</b> Os dados ficam só neste navegador. Configure o Supabase para publicar de verdade (veja o README).</div>'}
-    <div class="greet"><h1>Olá${u ? `, ${esc(firstName(u.name))}` : ''}! 👋<br>O que vai <em>adoçar</em> seu dia?</h1></div>
+    <div class="greet"><h1>${greetHtml(settings, u)}</h1></div>
     <a class="search-pill" href="#/buscar?foco=1">${I.search}<span>Buscar macaron, brownie, suspiro…</span></a>
 
     ${all.length ? `
@@ -1639,6 +1649,11 @@ function viewAppearance() {
       <form class="card stack" id="af">
         <label class="field"><span>Nome do app</span><input class="input" name="app_name" value="${esc(s.app_name)}" maxlength="40" required></label>
         <label class="field"><span>Frase</span><input class="input" name="tagline" value="${esc(s.tagline)}" maxlength="80"></label>
+        <label class="field"><span>Saudação do Início <span class="small muted" style="font-weight:400">(o nome da pessoa entra depois)</span></span>
+          <input class="input" name="greet_hello" value="${esc(s.greet_hello)}" maxlength="30" placeholder="${GREET_HELLO}"></label>
+        <label class="field"><span>Pergunta do Início <span class="small muted" style="font-weight:400">(a palavra entre *asteriscos* fica na cor do app)</span></span>
+          <input class="input" name="greet_text" value="${esc(s.greet_text)}" maxlength="80" placeholder="${GREET_TEXT}"></label>
+        <div class="greet" style="padding:0"><h1 id="pv-greet" style="font-size:22px">${greetHtml(s, user())}</h1></div>
         <label class="field"><span>WhatsApp da loja <span class="small muted" style="font-weight:400">(opcional, mostra "Pedir pelo WhatsApp")</span></span>
           <input class="input" name="whatsapp" inputmode="tel" value="${esc(fmtPhone(s.whatsapp))}" placeholder="(61) 99999-9999"></label>
         <button class="btn block" id="save">Salvar aparência</button>
@@ -1665,6 +1680,9 @@ function viewAppearance() {
   const form = document.getElementById('af');
   form.app_name.oninput = (e) => (document.getElementById('pv-name').textContent = e.target.value);
   form.tagline.oninput = (e) => (document.getElementById('pv-tag').textContent = e.target.value);
+  const showGreet = () => (document.getElementById('pv-greet').innerHTML = greetHtml({ greet_hello: form.greet_hello.value, greet_text: form.greet_text.value }, user()));
+  form.greet_hello.oninput = showGreet;
+  form.greet_text.oninput = showGreet;
   form.whatsapp.oninput = (e) => { e.target.value = fmtPhone(e.target.value.replace(/\D/g, '').slice(0, 11)); };
   document.getElementById('icon').onchange = (e) => { if (e.target.files[0]) { iconFile = e.target.files[0]; iconMode = 'foto'; showIcon(); } };
   document.getElementById('icon-reset').onclick = () => { iconMode = 'padrao'; iconFile = null; showIcon(); };
@@ -1678,6 +1696,11 @@ function viewAppearance() {
     try {
       const wa = form.whatsapp.value.replace(/\D/g, '');
       const patch = { primary_color: s.primary_color, app_name: form.app_name.value.trim() || 'Cozinha Doce', tagline: form.tagline.value.trim(), whatsapp: wa || null };
+      // Só manda a saudação quando mudou (assim salvar continua funcionando antes do 004_saudacao.sql).
+      const greetHello = form.greet_hello.value.trim() || GREET_HELLO;
+      const greetText = form.greet_text.value.trim() || GREET_TEXT;
+      if (greetHello !== settings.greet_hello) patch.greet_hello = greetHello;
+      if (greetText !== settings.greet_text) patch.greet_text = greetText;
       if (iconMode === 'macaron') {
         patch.icon_url = await api.uploadPhoto(await iconPng(iconBg, 512), 'app');
         patch.icon_192_url = await api.uploadPhoto(await iconPng(iconBg, 192), 'app');

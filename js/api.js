@@ -13,6 +13,8 @@ const DEFAULT_SETTINGS = {
   icon_url: null,
   icon_192_url: null,
   whatsapp: null,
+  greet_hello: 'Olá',
+  greet_text: 'O que vai *adoçar* seu dia?',
 };
 
 // =====================================================================

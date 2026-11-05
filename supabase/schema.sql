@@ -29,6 +29,8 @@ create table if not exists public.app_settings (
   icon_url text,      -- ícone 512x512 enviado pelo administrador
   icon_192_url text,  -- mesmo ícone em 192x192
   whatsapp text check (whatsapp is null or whatsapp ~ '^[0-9]{10,13}$'),
+  greet_hello text not null default 'Olá' check (length(greet_hello) between 1 and 30),
+  greet_text text not null default 'O que vai *adoçar* seu dia?' check (length(greet_text) between 1 and 80),
   updated_at timestamptz not null default now()
 );
 insert into public.app_settings (id) values (1) on conflict do nothing;

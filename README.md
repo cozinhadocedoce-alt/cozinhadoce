@@ -54,6 +54,9 @@ for f in preencher-doce enviar-push manifesto; do npx supabase functions deploy 
   ```
 - Modelo da IA: padrão `gemini-3.5-flash-lite` (o mesmo do Desapega). Para trocar: segredo `GEMINI_MODEL`. Limite: 200 fotos por hora.
 
+### 2a. Saudação do Início
+Rode [`supabase/004_saudacao.sql`](supabase/004_saudacao.sql) no SQL Editor. Depois o administrador muda "Olá" e "O que vai *adoçar* seu dia?" em **Menu → Aparência** (a palavra entre asteriscos fica na cor do app).
+
 ### 2b. Novidades por e-mail (Gmail)
 1. Rode [`supabase/003_novidades_email.sql`](supabase/003_novidades_email.sql) no SQL Editor.
 2. Guarde uma senha longa qualquer no Vault: `select vault.create_secret('SENHA-LONGA', 'news_email_secret');`
