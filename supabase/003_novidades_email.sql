@@ -19,6 +19,19 @@ update public.products set news_emailed_at = now()
 where status = 'published' and news_emailed_at is null
   and coalesce(published_at, created_at) < now() - interval '24 hours';
 
+-- Doce publicado (ou publicado de novo): entra na fila do e-mail, igual ao aviso no celular.
+create or replace function public.products_before_save()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at := now();
+  if new.status = 'published' and (tg_op = 'INSERT' or old.status <> 'published') then
+    new.published_at := now();
+    new.ai_fields := '{}';
+    new.news_emailed_at := null;
+  end if;
+  return new;
+end $$;
+
 -- Confere a senha guardada no Vault.
 create or replace function public.news_email_auth(p_secret text)
 returns void language plpgsql security definer set search_path = public as $$
