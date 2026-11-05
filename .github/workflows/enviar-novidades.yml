@@ -4,6 +4,11 @@ name: Enviar novidades por e-mail
 # "Novidades por e-mail" no perfil. Roda a cada 10 minutos e à mão (scripts/enviar-novidades.mjs).
 on:
   workflow_dispatch:
+    inputs:
+      teste:
+        description: 'Envio de teste: e-mail que recebe o doce mais recente (vazio = envio normal)'
+        required: false
+        default: ''
   schedule:
     - cron: '*/10 * * * *'
 
@@ -30,3 +35,4 @@ jobs:
           GMAIL_USER: cozinhadoce.doce@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           SITE_URL: https://cozinhadocedoce-alt.github.io/cozinhadoce/
+          TEST_TO: ${{ inputs.teste }}

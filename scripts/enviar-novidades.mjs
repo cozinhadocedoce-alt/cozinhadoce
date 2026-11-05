@@ -95,7 +95,29 @@ async function rpc(fn, args) {
   return body ? JSON.parse(body) : null;
 }
 
+// Envio de teste: manda o doce publicado mais recente só para TEST_TO, sem mexer na fila.
+async function sendTest(to) {
+  const headers = { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` };
+  const get = async (path) => { const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers }); if (!r.ok) throw new Error(`${path}: ${r.status}`); return r.json(); };
+  const [[prod], [settings]] = await Promise.all([
+    get('products?select=id,title,price,description,category,photos&status=eq.published&order=published_at.desc&limit=1'),
+    get('app_settings?select=app_name,tagline,primary_color,icon_url&id=eq.1'),
+  ]);
+  if (!prod) throw new Error('Nenhum doce publicado.');
+  const [cat] = prod.category ? await get(`categories?select=name,emoji&slug=eq.${encodeURIComponent(prod.category)}`) : [];
+  const app = { name: settings?.app_name, tagline: settings?.tagline, color: settings?.primary_color, icon: settings?.icon_url };
+  const product = { ...prod, photo: prod.photos?.[0], category_name: cat?.name, category_emoji: cat?.emoji };
+  const { subject, html, text } = buildEmail({ app, person: { name: '', token: '00000000-0000-0000-0000-000000000000' }, products: [product] });
+  if (DRY_RUN) { console.log(`DRY_RUN: teste "${subject}" não enviado.`); return; }
+  if (!GMAIL_USER || !GMAIL_APP_PASSWORD) throw new Error('Falta GMAIL_USER ou GMAIL_APP_PASSWORD.');
+  const { default: nodemailer } = await import('nodemailer');
+  const mail = nodemailer.createTransport({ service: 'gmail', auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD.replace(/\s+/g, '') } });
+  const info = await mail.sendMail({ from: { name: app.name || 'Cozinha Doce', address: GMAIL_USER }, to, subject: `[Teste] ${subject}`, html, text });
+  console.log(`Teste enviado: "${info.response}" aceito=${info.accepted.length} recusado=${info.rejected.length} id=${info.messageId}`);
+}
+
 async function main() {
+  if (process.env.TEST_TO) return sendTest(process.env.TEST_TO.trim());
   if (!NEWS_EMAIL_SECRET) throw new Error('Falta NEWS_EMAIL_SECRET.');
   const { app, products, people } = await rpc('news_email_pending', { p_secret: NEWS_EMAIL_SECRET });
   if (!products.length) { console.log('Nenhum doce novo para enviar.'); return; }
