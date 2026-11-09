@@ -1,0 +1,42 @@
+name: Publicar no GitHub Pages
+
+# Publica o app e gera as páginas de compartilhamento dos doces (d/<id>/, com a foto para o
+# WhatsApp). Roda a cada push, a cada 30 minutos (para doces publicados pelo app) e à mão.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - id: pages
+        uses: actions/configure-pages@v6
+      - run: node scripts/build-site.mjs
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+  <title>Cozinha Doce — doces feitos com carinho</title>
+  <meta name="description" content="Macarons, brownies, suspiros e doces finos de Milena Andrade. Veja as fotos, favorite e converse com a gente sobre qualquer doce.">
+  <meta name="theme-color" content="#7b4a2e">
+  <meta property="og:title" content="Cozinha Doce">
+  <meta property="og:description" content="Doces feitos com carinho. Veja o cardápio e faça sua encomenda.">
+  <meta property="og:image" content="icons/icon-512.png">
+  <link rel="manifest" href="manifest.webmanifest" id="manifest-link">
+  <link rel="icon" href="icons/favicon.png" type="image/png" id="favicon-link">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png?v=2" id="apple-icon-link">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Cozinha Doce">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Nunito:wght@400;600;700;800&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <script>
+    // Aplica a cor e o tema salvos antes de desenhar, para não piscar.
+    try {
+      var t = localStorage.getItem('cd-tema'); if (t) document.documentElement.dataset.theme = t;
+      var c = localStorage.getItem('cd-cor'); if (c) document.documentElement.style.setProperty('--primary', c);
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <div id="app">
+    <main id="view" aria-live="polite">
+      <div class="boot" role="status" aria-label="Carregando"><svg class="boot-mac" viewBox="0 0 120 112" aria-hidden="true"><defs><linearGradient id="tb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff0f5"/><stop offset="1" stop-color="#ffc2d4"/></linearGradient></defs><ellipse class="mac-shadow" cx="60" cy="104" rx="44" ry="5"/><g class="mac-bot"><path d="M6.466666666666667 68.8 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 q3.345833333333333 -3.3 6.691666666666666 0 L113.53333333333333 73.93333333333334 L6.466666666666667 73.93333333333334 Z" fill="#f59bb6"/><path d="M5 73.2 Q60 70.26666666666667 115 73.2 C115 97.4 5 97.4 5 73.2Z" fill="url(#tb)"/></g><g class="mac-fill"><rect x="10.866666666666667" y="51.2" width="98.26666666666667" height="17.6" rx="6.6" fill="#7a4a32"/></g><g class="mac-top"><path d="M6.466666666666667 51.2 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 q3.345833333333333 3.3 6.691666666666666 0 L113.53333333333333 46.06666666666667 L6.466666666666667 46.06666666666667 Z" fill="#f59bb6"/><path d="M5 46.8 C5 7.933333333333337 115 7.933333333333337 115 46.8 Q60 49.733333333333334 5 46.8Z" fill="url(#tb)"/><ellipse cx="38.733333333333334" cy="28.46666666666667" rx="18.333333333333332" ry="5.5" fill="#fff" opacity=".6" transform="rotate(-10 38.733333333333334 28.46666666666667)"/></g></svg></div>
+    </main>
+
+    <nav id="tabbar" aria-label="Menu principal">
+      <a href="#/" data-tab="inicio" class="tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>
+        <span>Início</span>
+      </a>
+      <a href="#/buscar" data-tab="buscar" class="tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></svg>
+        <span>Buscar</span>
+      </a>
+      <a href="#/adicionar" data-tab="adicionar" class="tab tab-add" aria-label="Adicionar">
+        <span class="tab-add-btn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span>
+        <span>Adicionar</span>
+      </a>
+      <a href="#/chat" data-tab="chat" class="tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.6A8 8 0 1 1 21 12z"/></svg>
+        <span>Chat</span>
+        <b class="badge" id="chat-badge" hidden></b>
+      </a>
+      <a href="#/menu" data-tab="menu" class="tab">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        <span>Menu</span>
+      </a>
+    </nav>
+  </div>
+
+  <div id="sheet-root"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

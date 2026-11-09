@@ -1,0 +1,38 @@
+name: Enviar novidades por e-mail
+
+# Manda por e-mail (Gmail da Cozinha Doce) os doces publicados há pouco para quem marcou
+# "Novidades por e-mail" no perfil. Roda a cada 10 minutos e à mão (scripts/enviar-novidades.mjs).
+on:
+  workflow_dispatch:
+    inputs:
+      teste:
+        description: 'Envio de teste: e-mail que recebe o doce mais recente (vazio = envio normal)'
+        required: false
+        default: ''
+  schedule:
+    - cron: '*/10 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: novidades-email
+  cancel-in-progress: false
+
+jobs:
+  enviar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm install --no-save --no-package-lock --ignore-scripts nodemailer@10.1.7
+      - run: node scripts/enviar-novidades.mjs
+        env:
+          NEWS_EMAIL_SECRET: ${{ secrets.NEWS_EMAIL_SECRET }}
+          GMAIL_USER: cozinhadoce.doce@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SITE_URL: https://cozinhadocedoce-alt.github.io/cozinhadoce/
+          TEST_TO: ${{ inputs.teste }}

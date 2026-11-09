@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Novidades por e-mail — Cozinha Doce</title>
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#7b4a2e">
+  <link rel="icon" href="icons/favicon.png" type="image/png">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,800&family=Nunito:wght@400;700;800&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <script>try { var t = localStorage.getItem('cd-tema'); if (t) document.documentElement.dataset.theme = t; var c = localStorage.getItem('cd-cor'); if (c) document.documentElement.style.setProperty('--primary', c); } catch (e) {}</script>
+  <style>main { max-width: 480px; margin: 0 auto; padding: 24px 16px; } .empty p { max-width: 340px; }</style>
+</head>
+<body>
+  <main>
+    <div class="empty" id="box">
+      <div class="e">⏳</div>
+      <h2>Tirando você da lista…</h2>
+    </div>
+  </main>
+  <script type="module">
+    import { CONFIG } from './js/config.js';
+    const box = document.getElementById('box');
+    const show = (emoji, title, text) => {
+      box.innerHTML = `<div class="e">${emoji}</div><h2>${title}</h2><p class="muted">${text}</p><a class="btn" href="./">Abrir a Cozinha Doce</a>`;
+    };
+    const token = new URLSearchParams(location.search).get('t') || '';
+    if (!/^[0-9a-f-]{36}$/i.test(token)) {
+      show('🤔', 'Link incompleto', 'Abra de novo o link “Não quero mais receber” do e-mail, ou desligue “Novidades por e-mail” no seu perfil do app.');
+    } else {
+      try {
+        const res = await fetch(`${CONFIG.SUPABASE_URL}/rest/v1/rpc/news_unsubscribe`, {
+          method: 'POST',
+          headers: { apikey: CONFIG.SUPABASE_ANON_KEY, Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ p_token: token }),
+        });
+        if (!res.ok) throw new Error(res.status);
+        if (await res.json()) show('👋', 'Pronto, você saiu da lista', 'Não vamos mais mandar novidades por e-mail. Se mudar de ideia, é só ligar “Novidades por e-mail” no seu perfil do app.');
+        else show('🤔', 'Não encontramos o seu cadastro', 'Talvez a conta tenha sido excluída. Você também pode desligar “Novidades por e-mail” no seu perfil do app.');
+      } catch {
+        show('📶', 'Não deu certo agora', 'Verifique a internet e abra o link de novo, ou desligue “Novidades por e-mail” no seu perfil do app.');
+      }
+    }
+  </script>
+</body>
+</html>
